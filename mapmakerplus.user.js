@@ -1,0 +1,4663 @@
+// ==UserScript==
+// @name         Mapmaker Pro ++
+// @namespace    http://tampermonkey.net/
+// @version      777
+// @description  https://docs.google.com/document/d/1Ed99ys5a9vWfS6ETQkSvslfGe0pUIgRPwDESnfl_MgU/edit?usp=sharing
+// @author       breeeee (big shout out to ai for correcting some errors :))
+// @match        https://mapmaker.deeeep.io/*
+// @match        https://mapmaker.deeeep.io/map/*
+// @icon         https://cdn.deeeep.io/custom/skins/27647-1-c90f65f2-4fb1-41d4-b755-b9c509568289.png
+// @grant        none
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    try {
+        console.log('Full script: Top-level loaded (use strict OK)');
+    } catch (e) {
+        console.error('Full script: Fatal error at top:', e);
+        return;
+    }
+
+    let baseNudgeAmount = 2;
+    const debugMode = true;
+    let keyHandler = null;
+    let flipMode = false;
+    let horizontalMode = false;
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+    let forceIndividualMode = false;
+    let forceWholeMode = false;
+    let snappingEnabled = false;
+    let snapThreshold = 15;
+    let enableRestore = false;
+
+
+    function resetRetry() {
+        retryCount = 0;
+    }
+
+    let pixiLib = null;
+
+    function getPixiLib() {
+        if (pixiLib) return pixiLib;
+        pixiLib = window.PIXI || (typeof PIXI !== 'undefined' ? PIXI : null);
+        if (!pixiLib && window.pixiApp) {
+            pixiLib = window.pixiApp.PIXI || window.pixiApp.constructor.PIXI;
+        }
+        if (!pixiLib) {
+            console.log('getPixiLib: PIXI not found - Will retry on demand');
+        } else {
+            console.log('getPixiLib: PIXI loaded successfully');
+        }
+        return pixiLib;
+    }
+
+    console.log('Full script: Variables defined');
+
+    let bakedChanges = {};
+
+    function storeBakedChange(shapeId, prop, value) {
+        if (!bakedChanges[shapeId]) bakedChanges[shapeId] = {};
+        bakedChanges[shapeId][prop] = value;
+        if (debugMode) console.log(`Bake: Tracked ${prop} for ID ${shapeId}:`, value);
+    }
+
+    function bakeIntoScreenObjects(screenObjects) {
+        if (!Array.isArray(screenObjects)) return;
+        let bakedCount = 0;
+        screenObjects.forEach(obj => {
+            if (!obj || !obj.id) return;
+            if (obj.type === 'H' && !obj.settings) {
+                obj.settings = {};
+                if (debugMode) console.log(`Bake: Initialized empty settings for H ID ${obj.id} (null safety)`);
+            }
+            const id = obj.id;
+            if (id && bakedChanges[id]) {
+                const changes = bakedChanges[id];
+                if (changes.scale && (obj.type === 'P' || obj.type === 'H')) {
+                    obj.scale = changes.scale;
+                    if (debugMode) console.log(`Bake: Added scale to prop ID ${id} (${obj.type}): ${obj.scale.x.toFixed(2)}x`);
+                    bakedCount++;
+                }
+                if (changes.opacity !== undefined) {
+                    obj.opacity = changes.opacity;
+                    if (debugMode) console.log(`Bake: Added opacity to ${obj.type || 'shape'} ID ${id}: ${obj.opacity.toFixed(1)}`);
+                    bakedCount++;
+                }
+                if (changes.zIndex !== undefined) {
+                    obj.zIndex = changes.zIndex;
+                    if (debugMode) console.log(`Bake: Added zIndex to ${obj.type} ID ${id}: ${obj.zIndex}`);
+                    bakedCount++;
+                }
+                if (changes.size !== undefined) {
+                    obj.size = changes.size;
+                    if (debugMode) console.log(`Bake: Added size to ${obj.type} ID ${id}: ${obj.size.toFixed(2)}x`);
+                    bakedCount++;
+                }
+                if (changes.settings && changes.settings.collidable !== undefined && obj.settings) {
+                    if (!obj.settings) obj.settings = {};
+                    obj.settings.collidable = changes.settings.collidable;
+                    if (debugMode) console.log(`Bake: Added collidable=${changes.settings.collidable} to ${obj.type} ID ${id} settings`);
+                    bakedCount++;
+                }
+                if (changes.hSType !== undefined && obj.type === 'H') {
+                    obj.hSType = changes.hSType;
+                    if (debugMode) console.log(`Bake: Added hSType=${changes.hSType} to H ID ${id}`);
+                    bakedCount++;
+                }
+
+                if (changes.position !== undefined) {
+                    obj.x = changes.position.x;
+                    obj.y = changes.position.y;
+                    if (debugMode) console.log(`Bake: Added position (${obj.x.toFixed(1)}, ${obj.y.toFixed(1)}) to ID ${id}`);
+                    bakedCount++;
+                }
+            }
+        });
+        if (debugMode) console.log(`Bake: Modified ${bakedCount} of ${screenObjects.length} screenObjects`);
+        return screenObjects;
+    }
+
+    if (debugMode) console.log('Bake: Hooks ready (enhanced with position baking)');
+
+    let originalFetch = window.fetch;
+    window.fetch = async function(url, options = {}) {
+        const urlStr = url.toString();
+        if (debugMode) console.log('NET DEBUG: Fetch to', urlStr, '- Method:', options?.method || 'GET');
+        const isMapSave = urlStr.includes('/maps/') && (options?.method === 'PUT' || options?.method === 'POST' || options?.method === 'PATCH');
+        if (isMapSave && options?.body) {
+            console.log('Bake: PUT/POST to /maps intercepted!', {url: urlStr, method: options.method});
+            try {
+                let bodyObj = options.body;
+                let wasString = false;
+                if (typeof bodyObj === 'string') {
+                    wasString = true;
+                    bodyObj = JSON.parse(bodyObj);
+                    console.log('Bake: Parsed string to object');
+                } else if (bodyObj && typeof bodyObj === 'object') {
+                    console.log('Bake: Direct object body - Keys:', Object.keys(bodyObj).slice(0, 5));
+                } else {
+                    console.log('Bake: Unexpected body type:', typeof bodyObj);
+                    return originalFetch.apply(this, arguments);
+                }
+
+                let modified = false;
+                if (bodyObj?.data && typeof bodyObj.data === 'string') {
+                    let mapData;
+                    try {
+                        mapData = JSON.parse(bodyObj.data);
+                        if (mapData?.screenObjects) {
+                            console.log('Bake: screenObjects found (length:', mapData.screenObjects.length, ')- Applying');
+                            bakeIntoScreenObjects(mapData.screenObjects);
+                            bodyObj.data = JSON.stringify(mapData);
+                            modified = true;
+                            console.log('Bake: Inner data injected');
+                        } else {
+                            console.log('Bake: No screenObjects - Data snippet:', bodyObj.data.substring(0, 200));
+                        }
+                    } catch (parseErr) {
+                        console.error('Bake: Parse data error:', parseErr);
+                    }
+                } else {
+                    console.log('Bake: No "data" field or not string - Skipping');
+                }
+
+                if (wasString && modified) {
+                    options.body = JSON.stringify(bodyObj);
+                    console.log('Bake: Full body re-stringified for fetch');
+                } else {
+                    options.body = bodyObj;
+                }
+                bakedChanges = {};
+                console.log('Bake: Forwarding modified body');
+            } catch (e) {
+                console.error('Bake fetch error:', e);
+            }
+        }
+        return originalFetch.apply(this, arguments);
+    };
+
+    console.log('Full script: Fetch hook ready');
+
+    const originalOpen = window.XMLHttpRequest.prototype.open;
+    window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        const urlStr = url.toString();
+        if (debugMode) console.log('NET DEBUG: XHR to', urlStr, '- Method:', method);
+        const isMapSave = urlStr.includes('/maps/') && (method === 'PUT' || method === 'POST' || method === 'PATCH');
+        if (isMapSave) {
+            console.log('Bake: XHR save intercepted!', {url: urlStr, method});
+            const origSend = this.send;
+            this.send = function(body) {
+                console.log('Bake: XHR send - Original body type/len:', typeof body, body?.length || 0);
+                try {
+                    let bodyObj = body;
+                    let wasString = false;
+                    if (typeof body === 'string') {
+                        wasString = true;
+                        bodyObj = JSON.parse(body);
+                        console.log('Bake: Parsed string to object (len:', body.length, ')');
+                    } else if (body && typeof body === 'object') {
+                        console.log('Bake: Direct object body - Has data?', !!bodyObj.data);
+                    } else {
+                        return origSend.call(this, body);
+                    }
+
+                    let modified = false;
+                    if (bodyObj?.data && typeof bodyObj.data === 'string') {
+                        let mapData;
+                        try {
+                            mapData = JSON.parse(bodyObj.data);
+                            if (mapData?.screenObjects && Array.isArray(mapData.screenObjects)) {
+                                console.log('Bake: screenObjects found (length:', mapData.screenObjects.length, ')- Applying');
+                                bakeIntoScreenObjects(mapData.screenObjects);
+                                bodyObj.data = JSON.stringify(mapData);
+                                modified = true;
+                                console.log('Bake: Inner data injected (new len:', bodyObj.data.length, ')');
+                            } else {
+                                console.log('Bake: No screenObjects - Data snippet:', bodyObj.data.substring(0, 200));
+                            }
+                        } catch (parseErr) {
+                            console.error('Bake: Parse data error:', parseErr);
+                        }
+                    } else {
+                        console.log('Bake: No "data" field or not string - Skipping');
+                    }
+
+                    let sendBody = body;
+                    if (wasString && modified) {
+                        sendBody = JSON.stringify(bodyObj);
+                        console.log('Bake: Full body re-stringified (old len:', body.length, '→ new len:', sendBody.length, ')');
+                    }
+
+                    bakedChanges = {};
+                    console.log('Bake: Forwarding', modified ? 'modified' : 'original', 'body');
+                    return origSend.call(this, sendBody);
+                } catch (e) {
+                    console.error('Bake XHR error:', e);
+                    return origSend.call(this, body);
+                }
+            };
+        }
+        return originalOpen.apply(this, arguments);
+    };
+
+    console.log('Full script: XHR hook ready');
+
+    function hookAppSaveMap() {
+        if (window.app && typeof window.app.saveMap === 'function') {
+            const origSave = window.app.saveMap;
+            window.app.saveMap = function(...args) {
+                console.log('Bake: app.saveMap intercepted! Args:', args.length);
+                let mapData = args[0] || window.app.currentMapData || window.app.mapData;
+                if (mapData?.data && typeof mapData.data === 'string') {
+                    let parsed = JSON.parse(mapData.data);
+                    if (parsed?.screenObjects) {
+                        console.log('Bake: Internal screenObjects - Applying');
+                        bakeIntoScreenObjects(parsed.screenObjects);
+                        mapData.data = JSON.stringify(parsed);
+                        console.log('Bake: Internal injection done');
+                    }
+                }
+                return origSave.apply(this, args);
+            };
+            console.log('Bake: Hooked app.saveMap');
+        } else {
+            console.log('Bake: No app.saveMap found');
+        }
+    }
+
+    function patchShapeCreation() {
+        if (window.app && window.app.createShape) {
+            const origCreate = window.app.createShape;
+            window.app.createShape = function(type, ...args) {
+                const shape = origCreate.call(this, type, ...args);
+                if (type === 'H' && shape && !shape.settings) {
+                    shape.settings = {};
+                    if (debugMode) console.log('patchShapeCreation: Initialized settings for new H shape');
+                }
+                return shape;
+            };
+            console.log('patchShapeCreation: Hooked shape creation');
+        } else {
+            setInterval(() => {
+                if (window.app?.layers) {
+                    window.app.layers.forEach(layer => {
+                        if (layer?.children) {
+                            layer.children.forEach(shape => {
+                                if (shape.type === 'H' && !shape.settings) {
+                                    shape.settings = {};
+                                    if (debugMode) console.log('patchShapeCreation: Fixed existing H settings (poll)');
+                                }
+                            });
+                        }
+                    });
+                }
+            }, 2000);
+            console.log('patchShapeCreation: Fallback poll active');
+        }
+    }
+
+
+    window.bakedChanges = bakedChanges;
+    window.bakeIntoScreenObjects = bakeIntoScreenObjects;
+
+    console.log('Internal hooks');
+
+    function getSelectedShapes(silent = false) {
+        try {
+            if (!window.app) {
+                if (!silent && debugMode) console.log('getSelectedShapes: window.app missing');
+                return [];
+            }
+            if (window.app._selectedObjects && window.app._selectedObjects.length > 0) {
+                const shapes = window.app._selectedObjects;
+                if (!silent && debugMode) console.log('getSelectedShapes: Found multi-select', { count: shapes.length, types: shapes.map(s => s.type) });
+                return shapes;
+            }
+            if (window.selectedShape) {
+                if (!silent && debugMode) console.log('getSelectedShapes: Found single selectedShape');
+                return [window.selectedShape];
+            }
+            if (window.app.selectedLayer && window.app.selectedLayer.children && window.app.selectedLayer.children.length > 0) {
+                if (!silent && debugMode) console.log('getSelectedShapes: Found single selectedLayer child');
+                return [window.app.selectedLayer.children[0]];
+            }
+            if (!silent && debugMode) console.log('getSelectedShapes: No selection found');
+            return [];
+        } catch (e) {
+            console.error('getSelectedShapes error:', e);
+            return [];
+        }
+    }
+
+    function getSelectedShape(silent = false) {
+        const shapes = getSelectedShapes(silent);
+        return shapes.length > 0 ? shapes[0] : null;
+    }
+
+    function isObjectSelected(silent = false) {
+        const selected = getSelectedShapes(silent).length > 0;
+        if (!silent && debugMode) console.log('isObjectSelected:', selected, `(count: ${getSelectedShapes(silent).length})`);
+        return selected;
+    }
+
+    function getPosition(obj) {
+        try {
+            return {
+                x: obj.x || (obj.position && obj.position.x) || 0,
+                y: obj.y || (obj.position && obj.position.y) || 0
+            };
+        } catch (e) {
+            console.error('getPosition error:', e);
+            return { x: 0, y: 0 };
+        }
+    }
+
+
+    function nudgeSelectedPoints(shape, deltaX, deltaY) {
+        try {
+            const selectedPoints = shape.selectedPoints || [];
+            if (selectedPoints.length === 0) {
+                console.warn('nudgeSelectedPoints: No selected points - select polygon vertices first', { type: shape?.type, id: shape?.id });
+                return false;
+            }
+
+            if (!shape.points || shape.points.length === 0) {
+                console.warn('nudgeSelectedPoints: Shape has no points array', { type: shape?.type, id: shape?.id });
+                return false;
+            }
+
+            let updatedCount = 0;
+            let snappedCount = 0;
+            let needsRedraw = false;
+
+            selectedPoints.forEach((selPoint, idx) => {
+                let mainIndex = shape.points.findIndex(p => p === selPoint);
+
+                if (mainIndex === -1) {
+                    mainIndex = shape.points.findIndex(p => {
+                        return (p.x === selPoint.x && p.y === selPoint.y) ||
+                            (p.position && selPoint.position && p.position.x === selPoint.position.x && p.position.y === selPoint.position.y);
+                    });
+                }
+
+                if (mainIndex === -1) {
+                    console.warn(`nudgeSelectedPoints: Selected point #${idx} not found in main points, skipping`);
+                    return;
+                }
+
+                const point = shape.points[mainIndex];
+                if (!point) return;
+
+                const oldX = point.x !== undefined ? point.x : (point.position ? point.position.x : 0);
+                const oldY = point.y !== undefined ? point.y : (point.position ? point.position.y : 0);
+
+                const newX = oldX + deltaX;
+                const newY = oldY + deltaY;
+
+
+                if (point.x !== undefined && point.y !== undefined) {
+                    point.x = newX;
+                    point.y = newY;
+                } else if (point.position) {
+                    point.position.x = newX;
+                    point.position.y = newY;
+                } else {
+                    console.warn('nudgeSelectedPoints: Invalid point structure at mainIndex', mainIndex);
+                    return;
+                }
+
+                const allPointsForSnap = getAllPointsInLayer(shape);
+                const snapped = snapPoint(point, allPointsForSnap);
+                if (snapped) snappedCount++;
+
+
+                if (selPoint !== point) {
+                    if (selPoint.x !== undefined && selPoint.y !== undefined) {
+                        selPoint.x = point.x;
+                        selPoint.y = point.y;
+                    } else if (selPoint.position) {
+                        selPoint.position.x = point.x;
+                        selPoint.position.y = point.y;
+                    }
+                }
+
+                updatedCount++;
+                needsRedraw = true;
+                if (debugMode) console.log(`nudgeSelectedPoints: Moved selected point #${idx + 1} (main index ${mainIndex}) to (${point.x.toFixed(1)}, ${point.y.toFixed(1)})`);
+            });
+
+            if (updatedCount > 0 && needsRedraw && typeof shape.redraw === 'function') {
+                shape.redraw();
+                console.log(`nudgeSelectedPoints: SUCCESS - Updated ${updatedCount} points (${snappedCount} snapped) on ${shape.type} ID ${shape.id} `);
+                return true;
+            } else {
+                console.warn('nudgeSelectedPoints: No points updated');
+                return false;
+            }
+        } catch (e) {
+            console.error('nudgeSelectedPoints error:', e);
+            return false;
+        }
+    }
+
+
+    function snapPoint(point, allPoints, threshold = snapThreshold) {
+        if (!snappingEnabled) return point;
+        let closest = null;
+        let minDist = threshold;
+        allPoints.forEach(other => {
+            if (other === point) return;
+            const dx = other.x - point.x;
+            const dy = other.y - point.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < minDist) {
+                minDist = dist;
+                closest = other;
+            }
+        });
+        if (closest) {
+            point.x = closest.x;
+            point.y = closest.y;
+            if (debugMode) console.log(`Snapped point to (${point.x.toFixed(1)}, ${point.y.toFixed(1)})`);
+            return true;
+        }
+        return false;
+    }
+
+    function nudgeSelectedPoint(shape, deltaX, deltaY) {
+        return nudgeSelectedPoints(shape, deltaX, deltaY);
+    }
+
+    function nudgeWholeShape(shape, deltaX, deltaY) {
+        try {
+            const pos = getPosition(shape);
+            const newX = pos.x + deltaX;
+            const newY = pos.y + deltaY;
+            if (shape.x !== undefined) {
+                shape.x = newX;
+                shape.y = newY;
+            } else if (shape.position) {
+                shape.position.x = newX;
+                shape.position.y = newY;
+            }
+            if (typeof shape.redraw === 'function') {
+                shape.redraw();
+            }
+            if (debugMode) console.log(`nudgeWholeShape: SUCCESS - Position to (${newX.toFixed(1)}, ${newY.toFixed(1)}) for ${shape.type} ID ${shape.id}`);
+            return true;
+        } catch (e) {
+            console.error('nudgeWholeShape error:', e);
+            return false;
+        }
+    }
+
+    function getAllPointsInLayer(shape) {
+        let allPoints = [...(shape.points || [])];
+        if (window.app && window.app.selectedLayer && window.app.selectedLayer.children) {
+
+            window.app.selectedLayer.children.forEach(sibling => {
+                if (sibling !== shape && sibling.points && Array.isArray(sibling.points)) {
+                    allPoints = allPoints.concat(sibling.points);
+                }
+            });
+        } else if (window.pixiApp?.stage?.children) {
+
+            window.pixiApp.stage.children.forEach(sibling => {
+                if (sibling !== shape && sibling.points && Array.isArray(sibling.points)) {
+                    allPoints = allPoints.concat(sibling.points);
+                }
+            });
+        }
+        if (debugMode) console.log(`getAllPointsInLayer: Collected ${allPoints.length} points from layer/stage`);
+        return allPoints;
+    }
+
+    function applyNudge(deltaX, deltaY, forceWhole = false) {
+        try {
+            if (debugMode) console.log('applyNudge: Starting', { deltaX, deltaY, forceWhole, forceIndividualMode, forceWholeMode });
+            const shapes = getSelectedShapes(true);
+            if (shapes.length === 0) {
+                if (debugMode) console.log('applyNudge: No shapes selected, skipping');
+                return;
+            }
+
+            let totalSuccess = 0;
+            shapes.forEach((shape, idx) => {
+                if (debugMode) console.log(`applyNudge: Processing shape ${idx + 1}/${shapes.length}`, { type: shape.type, id: shape.id, hasPoints: !!shape.points, pointsLength: shape.points?.length || 0 });
+
+                let success = false;
+
+                if (shape.points && shape.points.length > 0) {
+                    const selectedPoints = shape.selectedPoints || [];
+                    const totalPoints = shape.points.length;
+                    const isPartialMode = selectedPoints.length > 0 && selectedPoints.length < totalPoints;
+                    const isWholeMode = forceWhole || forceWholeMode || selectedPoints.length === 0 || selectedPoints.length === totalPoints;
+                    const useIndividual = forceIndividualMode || isPartialMode;
+
+                    if (useIndividual) {
+
+                        success = nudgeSelectedPoints(shape, deltaX, deltaY);
+                        if (debugMode) console.log(`applyNudge: Individual mode applied on shape ID ${shape.id}`);
+
+                    } else {
+
+                        let updatedCount = 0;
+                        let snappedCount = 0;
+                        let needsRedraw = false;
+                        shape.points.forEach((point, pIdx) => {
+                            if (!point) return;
+                            const oldX = point.x !== undefined ? point.x : (point.position ? point.position.x : 0);
+                            const oldY = point.y !== undefined ? point.y : (point.position ? point.position.y : 0);
+                            const newX = oldX + deltaX;
+                            const newY = oldY + deltaY;
+
+                            if (point.x !== undefined && point.y !== undefined) {
+                                point.x = newX;
+                                point.y = newY;
+                            } else if (point.position) {
+                                point.position.x = newX;
+                                point.position.y = newY;
+                            } else {
+                                console.warn('applyNudge: Invalid point at', pIdx);
+                                return;
+                            }
+                            const allPointsForSnap = getAllPointsInLayer(shape);
+                            const snapped = snapPoint(point, allPointsForSnap);
+                            if (snapped) snappedCount++;
+                            updatedCount++;
+                            needsRedraw = true;
+                        });
+                        if (updatedCount > 0 && needsRedraw && typeof shape.redraw === 'function') {
+                            shape.redraw();
+                            success = true;
+                            if (debugMode) console.log(`applyNudge: Whole mode - Nudged all ${updatedCount} points (${snappedCount} snapped) on shape ID ${shape.id}`);
+                        }
+                    }
+
+                } else {
+
+                    success = nudgeWholeShape(shape, deltaX, deltaY);
+                }
+
+
+                if (success && shape.x !== undefined && shape.y !== undefined) {
+                    storeBakedChange(shape.id, 'position', { x: shape.x, y: shape.y });
+                }
+
+                if (success) totalSuccess++;
+                else if (debugMode) console.log(`applyNudge: Failed on shape ${idx + 1} (${shape.type})`);
+            });
+
+            if (totalSuccess > 0) {
+
+                if (window.pixiApp?.renderer?.render) {
+                    if (applyNudge._renderTimeout) clearTimeout(applyNudge._renderTimeout);
+                    applyNudge._renderTimeout = setTimeout(() => {
+                        window.pixiApp.renderer.render(window.pixiApp.stage);
+                        refreshCanvasBounds();
+                        if (debugMode) console.log('applyNudge: Global render and refreshCanvasBounds called');
+                    }, 50);
+                }
+                if (debugMode) console.log(`applyNudge: Overall success - ${totalSuccess}/${shapes.length} shapes`);
+            }
+        } catch (e) {
+            console.error('applyNudge error:', e);
+        }
+    }
+
+    function flipShapePointsHorizontal(shape) {
+        if (!shape || !shape.points || shape.points.length < 3) {
+            if (debugMode) console.log('flipShapePointsHorizontal: Invalid shape/points - skip');
+            return false;
+        }
+
+        let centerX = 0;
+        shape.points.forEach(p => {
+            centerX += p.x;
+        });
+        centerX /= shape.points.length;
+
+        shape.points.forEach(point => {
+            const dx = point.x - centerX;
+            point.x = centerX - dx;
+        });
+
+        if (typeof shape.redraw === 'function') {
+            shape.redraw();
+        }
+
+        refreshCanvasBounds();
+        if (debugMode) console.log(`flipShapePointsHorizontal: Flipped ${shape.type || 'shape'} horizontally`);
+        return true;
+    }
+
+
+    function flipShapePointsVertical(shape) {
+        if (!shape || !shape.points || shape.points.length < 3) {
+            if (debugMode) console.log('flipShapePointsVertical: Invalid shape/points - skip');
+            return false;
+        }
+
+        let centerY = 0;
+        shape.points.forEach(p => {
+            centerY += p.y;
+        });
+        centerY /= shape.points.length;
+
+        shape.points.forEach(point => {
+            const dy = point.y - centerY;
+            point.y = centerY - dy;
+        });
+
+        if (typeof shape.redraw === 'function') {
+            shape.redraw();
+        }
+
+        refreshCanvasBounds();
+        if (debugMode) console.log(`flipShapePointsVertical: Flipped ${shape.type || 'shape'} vertically`);
+        return true;
+    }
+    function applyFlipHorizontal() {
+        try {
+            const shape = getSelectedShape();
+            if (!shape) {
+                if (debugMode) console.log('applyFlipHorizontal: No shape selected');
+                return;
+            }
+            const success = flipShapePointsHorizontal(shape);
+            if (success && window.pixiApp?.renderer?.render) {
+                window.pixiApp.renderer.render(window.pixiApp.stage);
+            }
+        } catch (e) {
+            console.error('applyFlipHorizontal error:', e);
+        }
+    }
+
+    function applyFlipVertical() {
+        try {
+            const shape = getSelectedShape();
+            if (!shape) {
+                if (debugMode) console.log('applyFlipVertical: No shape selected');
+                return;
+            }
+            const success = flipShapePointsVertical(shape);
+            if (success && window.pixiApp?.renderer?.render) {
+                window.pixiApp.renderer.render(window.pixiApp.stage);
+            }
+        } catch (e) {
+            console.error('applyFlipVertical error:', e);
+        }
+    }
+
+    function rotateShapePoints(shape, angleDegrees) {
+        if (!shape || !shape.points || shape.points.length < 3) {
+            if (debugMode) console.log('rotateShapePoints: Invalid shape/points - skip');
+            return false;
+        }
+
+        const angleRad = (angleDegrees * Math.PI) / 180;
+        const cosA = Math.cos(angleRad);
+        const sinA = Math.sin(angleRad);
+
+        let centerX = 0, centerY = 0;
+        shape.points.forEach(p => {
+            centerX += p.x;
+            centerY += p.y;
+        });
+        centerX /= shape.points.length;
+        centerY /= shape.points.length;
+
+        shape.points.forEach(point => {
+            const dx = point.x - centerX;
+            const dy = point.y - centerY;
+            point.x = centerX + (dx * cosA - dy * sinA);
+            point.y = centerY + (dx * sinA + dy * cosA);
+        });
+
+
+        let newCenterX = 0, newCenterY = 0;
+        shape.points.forEach(p => {
+            newCenterX += p.x;
+            newCenterY += p.y;
+        });
+        newCenterX /= shape.points.length;
+        newCenterY /= shape.points.length;
+
+        const driftX = Math.abs(newCenterX - centerX);
+        const driftY = Math.abs(newCenterY - centerY);
+        const totalDrift = Math.sqrt(driftX * driftX + driftY * driftY);
+
+        if (typeof shape.redraw === 'function') {
+            shape.redraw();
+        }
+
+        if (totalDrift > 0.1) {
+            const lerpSteps = totalDrift > 1 ? 3 : 1;
+            let step = 0;
+            const syncStep = () => {
+                step++;
+                shape.x = shape.x + (newCenterX - shape.x) * (step / lerpSteps);
+                shape.y = shape.y + (newCenterY - shape.y) * (step / lerpSteps);
+                if (step < lerpSteps) requestAnimationFrame(syncStep);
+            };
+            requestAnimationFrame(syncStep);
+        }
+
+        if (debugMode) console.log(`rotateShapePoints: Rotated ${shape.type || 'shape'} by ${angleDegrees}° around center`);
+        return true;
+    }
+
+    function applyRotation(angleDegrees, forceWhole = false) {
+        try {
+            const shape = getSelectedShape();
+            if (!shape) {
+                if (debugMode) console.log('applyRotation: No shape, skipping');
+                return;
+            }
+
+            let isWhole = forceWhole || !(shape.selectedPoints && shape.selectedPoints.length > 0);
+            if (!isWhole) {
+                if (debugMode) console.log('applyRotation: Vertex selected - select whole shape for rotation');
+                return;
+            }
+
+            const success = rotateShapePoints(shape, angleDegrees);
+
+            if (success) {
+                if (window.pixiApp?.renderer?.render) {
+                    window.pixiApp.renderer.render(window.pixiApp.stage);
+                }
+                refreshCanvasBounds();
+                if (debugMode) console.log(`applyRotation: Success - ${shape.type || 'shape'} rotated ${angleDegrees}°`);
+            }
+        } catch (e) {
+            console.error('applyRotation error:', e);
+        }
+    }
+
+    function applyEyedrop(idx) {
+        try {
+            if (!isObjectSelected()) {
+                if (debugMode) console.log('Eyedrop: No shape selected');
+                return;
+            }
+            const shape = getSelectedShape();
+            if (!shape.colors || shape.colors.length < 2) {
+                if (debugMode) console.log('Eyedrop: Selected shape has no gradient');
+                return;
+            }
+
+            if ('EyeDropper' in window) {
+                new EyeDropper().open()
+                    .then(result => {
+                    const hex = result.sRGBHex;
+                    const color = parseInt(hex.slice(1), 16);
+                    shape.colors[idx] = color;
+                    if (typeof shape.redraw === 'function') {
+                        shape.redraw();
+                        setTimeout(() => shape.redraw(), 50);
+                    }
+                    refreshCanvasBounds();
+                    if (debugMode) console.log(`Eyedrop: Set ${idx === 0 ? 'top' : 'bottom'} color to 0x${color.toString(16).toUpperCase()}`);
+                })
+                    .catch(err => {
+                    if (debugMode) console.log('Eyedrop: API canceled or error:', err);
+                });
+            } else {
+                if (debugMode) console.log('Eyedrop: Browser Eyedropper API unsupported');
+            }
+        } catch (e) {
+            console.error('Eyedrop: applyEyedrop error:', e);
+        }
+    }
+
+    function toggleFlipGradient() {
+        try {
+            if (!isObjectSelected()) return;
+            const shape = getSelectedShape();
+            if (!shape.colors || shape.colors.length < 2) return;
+
+            flipMode = !flipMode;
+
+
+            if (flipMode) {
+                const temp = shape.colors[0];
+                shape.colors[0] = shape.colors[1];
+                shape.colors[1] = temp;
+            } else {
+
+            }
+
+            if (typeof shape.redraw === 'function') shape.redraw();
+            refreshCanvasBounds();
+            if (debugMode) console.log(`toggleFlipGradient: Now ${flipMode ? 'flipped' : 'normal'}`);
+        } catch (e) {
+            console.error('toggleFlipGradient error:', e);
+            flipMode = !flipMode;
+        }
+    }
+
+
+    function toggleHorizontalGradient() {
+        try {
+            if (!isObjectSelected()) return;
+            const shape = getSelectedShape();
+            if (!shape.colors || shape.colors.length < 2) return;
+
+            horizontalMode = !horizontalMode;
+
+            if (horizontalMode) {
+                rotateShapePoints(shape, 90);
+            } else if (shape._originalPoints) {
+                shape.points = [...shape._originalPoints];
+            }
+
+            if (typeof shape.redraw === 'function') shape.redraw();
+            refreshCanvasBounds();
+            if (debugMode) console.log(`toggleHorizontalGradient: Now ${horizontalMode ? 'horizontal' : 'normal'}`);
+        } catch (e) {
+            console.error('toggleHorizontalGradient error:', e);
+            horizontalMode = !horizontalMode;
+        }
+    }
+
+
+    function refreshCanvasBounds() {
+        try {
+            if (!window.app || !window.app.viewport) return;
+            if (window.pixiApp?.renderer?.render) {
+                window.pixiApp.renderer.render(window.pixiApp.stage);
+            }
+            window.app.viewport.dirty = true;
+            if (debugMode) console.log('refreshCanvasBounds: Rendered');
+        } catch (e) {
+            console.error('refreshCanvasBounds error:', e);
+        }
+    }
+
+
+
+    function handleKey(event) {
+        try {
+
+            const target = event.target;
+            const tagName = target.tagName ? target.tagName.toLowerCase() : '';
+            const isEditable = target.isContentEditable;
+            if (tagName === 'input' || tagName === 'textarea' || isEditable) {
+                return;
+            }
+
+            const key = event.key.toLowerCase();
+            if (debugMode) console.log('handleKey: Key pressed', { key, ctrl: event.ctrlKey, shift: event.shiftKey });
+
+            let prevent = false;
+
+            if ((key === '+' || key === '=') && !event.ctrlKey && !event.altKey) {
+                const shape = getSelectedShape();
+                if (shape && (shape._texture || shape.texture)) {
+                    scaleProp(shape, 0.1);
+                    prevent = true;
+                }
+            } else if (key === '-' && !event.ctrlKey && !event.altKey) {
+                const shape = getSelectedShape();
+                if (shape && (shape._texture || shape.texture)) {
+                    scaleProp(shape, -0.1);
+                    prevent = true;
+                }
+            }
+
+            if (key === 'x' && event.shiftKey) {
+                snappingEnabled = !snappingEnabled;
+                console.log(`Snapping: ${snappingEnabled ? 'ON' : 'OFF'}`);
+                prevent = true;
+            }
+
+            if (key === 'l' && event.shiftKey) {
+                const shape = getSelectedShape();
+                if (shape && shape.type === 'H') {
+                    const newHSType = prompt(`Current hSType: ${shape.hSType || 28}\nEnter new hSType (number):`, shape.hSType || 28);
+                    if (newHSType !== null && !isNaN(newHSType)) {
+                        changeHSType(shape, parseInt(newHSType));
+                    }
+                    prevent = true;
+                    return;
+                }
+            }
+
+            if (key === 'i' && event.shiftKey) {
+                const shape = getSelectedShape();
+                if (shape && shape.points && shape.type !== 'H') {
+                    forceIndividualMode = !forceIndividualMode;
+                    forceWholeMode = false;
+                    console.log(`TOGGLE: Individual mode ${forceIndividualMode ? 'ON' : 'OFF'} for polygon ID ${shape.id}`);
+                    prevent = true;
+                    return;
+                }
+            }
+
+            if (key === 'w') {
+                const shape = getSelectedShape();
+                if (shape && shape.points) {
+                    forceWholeMode = !forceWholeMode;
+                    forceIndividualMode = false;
+                    console.log(`TOGGLE: Whole mode ${forceWholeMode ? 'ON' : 'OFF'} for polygon ID ${shape.id}`);
+                    prevent = true;
+                    return;
+                }
+            }
+
+            if (key === '>' && event.shiftKey) {
+                const shape = getSelectedShape();
+                if (shape) {
+                    const newZ = Math.min(100, (shape.zIndex || 0) + 10);
+                    shape.zIndex = newZ;
+                    storeBakedChange(shape.id, 'zIndex', newZ);
+                    if (shape.parent) {
+                        shape.parent.sortableChildren = true;
+                        shape.parent.sortChildren();
+                    }
+                    refreshCanvasBounds();
+                    prevent = true;
+                }
+            } else if (key === '<' && event.shiftKey) {
+                const shape = getSelectedShape();
+                if (shape) {
+                    const newZ = Math.max(-100, (shape.zIndex || 0) - 10);
+                    shape.zIndex = newZ;
+                    storeBakedChange(shape.id, 'zIndex', newZ);
+                    if (shape.parent) {
+                        shape.parent.sortableChildren = true;
+                        shape.parent.sortChildren();
+                    }
+                    refreshCanvasBounds();
+                    prevent = true;
+                }
+            }
+
+
+            if (key === 'b' && event.shiftKey) {
+                const shape = getSelectedShape();
+                if (shape) {
+                    toggleCollidable(shape);
+                    prevent = true;
+                }
+            }
+
+            if ((key === '{' || key === '}') && event.shiftKey) {
+                const shape = getSelectedShape();
+                if (shape) {
+                    const delta = (key === '}' && event.shiftKey) ? 0.1 : -0.1;
+                    adjustTransparency(shape, delta);
+                    prevent = true;
+                } else if (debugMode) {
+                    console.log('handleKey: [ / ] ignored - Select a prop or polygon first');
+                }
+            }
+
+            if (key === '~' && event.shiftKey) {
+                applyNudge(10, 10);
+                prevent = true;
+            }
+            if (key === '1') {
+                applyNudge(0.1, 0);
+                prevent = true;
+            } else if (key === '2') {
+                applyNudge(-0.1, 0);
+                prevent = true;
+            } else if (key === '3') {
+                applyNudge(0, -0.1);
+                prevent = true;
+            } else if (key === '4') {
+                applyNudge(0, 0.1);
+                prevent = true;
+            } else if (key === 'z' && !event.ctrlKey) {
+                applyNudge(0, 0);
+                prevent = true;
+            }
+
+
+            if (key === 'f' && event.shiftKey) {
+                toggleFlipGradient();
+                prevent = true;
+            }
+
+            if (key === 'w' && event.shiftKey) {
+                toggleHorizontalGradient();
+                prevent = true;
+            }
+
+            if (key === 'q' || key === 'e') {
+                const isQ = key === 'q';
+                const angle = (event.shiftKey ? 90 : 15) * (isQ ? 1 : -1);
+                applyRotation(angle);
+                prevent = true;
+            }
+
+            if (key === 'a' && event.shiftKey) {
+                applyFlipHorizontal();
+                prevent = true;
+            }
+
+
+            if (key === 'd' && event.shiftKey) {
+                applyFlipVertical();
+                prevent = true;
+            }
+
+            if (['arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) {
+                const multiplier = event.shiftKey ? 5 : 1;
+                const delta = baseNudgeAmount * multiplier;
+                let deltaX = 0, deltaY = 0;
+                switch (key) {
+                    case 'arrowleft': deltaX = -delta; break;
+                    case 'arrowright': deltaX = delta; break;
+                    case 'arrowup': deltaY = -delta; break;
+                    case 'arrowdown': deltaY = delta; break;
+                }
+                applyNudge(deltaX, deltaY);
+                prevent = true;
+            }
+
+            if (key === '9' || key === '0') {
+                const idx = key === '9' ? 0 : 1;
+                applyEyedrop(idx);
+                prevent = true;
+            }
+
+
+
+            if (prevent) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (debugMode) console.log('handleKey: Prevented default/propagation');
+            }
+        } catch (e) {
+            console.error('handleKey error:', e);
+        }
+    }
+
+
+    function scaleProp(shape, deltaScale) {
+        try {
+            if (!shape || !shape._texture && !shape.texture) {
+                if (debugMode) console.log('scaleProp: Not a prop - Select a PNG sprite');
+                return false;
+            }
+            if (!shape.scale || typeof shape.scale.x !== 'number') {
+                if (debugMode) console.log('scaleProp: Prop missing valid scale');
+                return false;
+            }
+
+            const oldScaleX = shape.scale.x;
+            const oldScaleY = shape.scale.y;
+            const newScaleX = Math.max(0.1, Math.min(5.0, oldScaleX + deltaScale));
+            const newScaleY = Math.max(0.1, Math.min(5.0, oldScaleY + deltaScale));
+
+            shape.scale.x = newScaleX;
+            shape.scale.y = newScaleY;
+            storeBakedChange(shape.id, 'scale', {x: newScaleX, y: newScaleY});
+
+            let centerX, centerY;
+            if (shape._size && shape._size.width && shape._size.height) {
+                const posX = shape.position ? shape.position.x : (shape.x || 0);
+                const posY = shape.position ? shape.position.y : (shape.y || 0);
+                centerX = posX + (shape._size.width * oldScaleX) / 2;
+                centerY = posY + (shape._size.height * oldScaleY) / 2;
+                const newWidth = shape._size.width * newScaleX;
+                const newHeight = shape._size.height * newScaleY;
+                const newPosX = centerX - newWidth / 2;
+                const newPosY = centerY - newHeight / 2;
+                if (shape.position) {
+                    shape.position.x = newPosX;
+                    shape.position.y = newPosY;
+                } else {
+                    shape.x = newPosX;
+                    shape.y = newPosY;
+                }
+            }
+
+            refreshCanvasBounds();
+            if (debugMode) console.log(`scaleProp: Resized to ${newScaleX.toFixed(2)}x / ${newScaleY.toFixed(2)}y`);
+            return true;
+        } catch (e) {
+            console.error('scaleProp error:', e);
+            return false;
+        }
+    }
+
+    function adjustTransparency(shape, deltaAlpha) {
+        try {
+            if (!shape) return false;
+
+            let currentAlpha = 1.0;
+            let isProp = shape._texture || shape.texture;
+            let isPolygon = shape.points && (shape.colors || shape.shape || shape.lines);
+            let isBg = shape.type === 'Bg';
+
+            if (isProp) {
+                currentAlpha = shape.alpha || 1.0;
+            } else if (isPolygon || isBg) {
+                let fillObj = shape.shape || shape.lines || shape;
+                currentAlpha = (fillObj._fillStyle ? fillObj._fillStyle.alpha : fillObj.alpha) || 1.0;
+                if (isBg) currentAlpha = shape.alpha || (shape._opacity !== undefined ? shape._opacity : 1.0);
+            } else {
+                if (debugMode) console.log('adjustTransparency: Unsupported shape type');
+                return false;
+            }
+
+            const newAlpha = Math.max(0.0, Math.min(1.0, currentAlpha + deltaAlpha));
+            storeBakedChange(shape.id, 'opacity', newAlpha);
+
+            if (window.app && window.app.screenObjects) {
+                const soObj = window.app.screenObjects[shape.id.toString()];
+                if (soObj) soObj.opacity = newAlpha;
+            }
+
+            if (isProp) {
+                shape.alpha = newAlpha;
+            } else if (isPolygon) {
+                let fillObj = shape.shape || shape.lines || shape;
+                if (fillObj._fillStyle) fillObj._fillStyle.alpha = newAlpha;
+                fillObj.alpha = newAlpha;
+                if (typeof shape.redraw === 'function') {
+                    shape.redraw();
+                    setTimeout(() => shape.redraw(), 50);
+                }
+            } else if (isBg) {
+                shape.alpha = newAlpha;
+                if (shape._opacity !== undefined) shape._opacity = newAlpha;
+                window.app.worldDirty = true;
+            }
+
+            refreshCanvasBounds();
+            if (debugMode) console.log(`adjustTransparency: Set to ${newAlpha.toFixed(1)}`);
+            return true;
+        } catch (e) {
+            console.error('adjustTransparency error:', e);
+            return false;
+        }
+    }
+
+    function changeHSType(shape, newHSType) {
+        try {
+            if (!shape || shape.type !== 'H') return false;
+            if (!shape.settings) shape.settings = {};
+            shape.hSType = newHSType;
+            shape.settings.id = newHSType;
+            storeBakedChange(shape.id, 'hSType', newHSType);
+
+            if (window.app && window.app.screenObjects) {
+                const soObj = window.app.screenObjects[shape.id.toString()];
+                if (soObj) soObj.hSType = newHSType;
+            }
+
+            if (typeof shape.redraw === 'function') {
+                shape.redraw();
+                setTimeout(() => shape.redraw(), 50);
+            }
+            refreshCanvasBounds();
+            window.app.worldDirty = true;
+            if (debugMode) console.log(`changeHSType: Set to ${newHSType}`);
+            return true;
+        } catch (e) {
+            console.error('changeHSType error:', e);
+            return false;
+        }
+    }
+
+    function toggleCollidable(shape) {
+        try {
+            if (!shape || !shape.points || !shape.settings) return false;
+            if (!shape.settings) shape.settings = {};
+            const newCollidable = !shape.settings.collidable;
+            shape.settings.collidable = newCollidable;
+            storeBakedChange(shape.id, 'settings', {collidable: newCollidable});
+
+            if (window.app && window.app.screenObjects) {
+                const soObj = window.app.screenObjects[shape.id.toString()];
+                if (soObj) {
+                    if (!soObj.settings) soObj.settings = {};
+                    soObj.settings.collidable = newCollidable;
+                }
+            }
+
+            window.app.worldDirty = true;
+            if (typeof shape.redraw === 'function') {
+                shape.redraw();
+                setTimeout(() => shape.redraw(), 50);
+            }
+            refreshCanvasBounds();
+            if (debugMode) console.log(`toggleCollidable: Set to ${newCollidable}`);
+            return true;
+        } catch (e) {
+            console.error('toggleCollidable error:', e);
+            return false;
+        }
+    }
+
+    function probeGradient(shape, beforeSet = false) {
+        if (!debugMode) return;
+        console.log(`probeGradient: ${beforeSet ? 'Before' : 'After'} - Shape type: ${shape.type}, Keys:`, Object.keys(shape || {}));
+        if (shape.colors) console.log(`probeGradient: Colors: [0x${shape.colors[0]?.toString(16).toUpperCase()}, 0x${shape.colors[1]?.toString(16).toUpperCase()}]`);
+        if (shape.fill) console.log(`probeGradient: shape.fill:`, shape.fill);
+        if (shape.shape) console.log(`probeGradient: shape.shape._fillStyle:`, shape.shape._fillStyle);
+        if (shape.lines) console.log(`probeGradient: shape.lines._fillStyle:`, shape.lines._fillStyle);
+        if (shape.container?.children?.length > 0) {
+            console.log(`probeGradient: container children: ${shape.container.children.length}`);
+        }
+        console.log(`probeGradient: PIXI: ${!!window.PIXI}, pixiApp: ${!!window.pixiApp}`);
+    }
+
+
+    function initFeatures() {
+        try {
+            console.log('initFeatures: Starting initialization');
+            if (!window.app) {
+                console.log('initFeatures: window.app not ready - retrying...');
+                setTimeout(initFeatures, 2000);
+                return;
+            }
+
+            if (!keyHandler) {
+                keyHandler = (event) => handleKey(event);
+                document.addEventListener('keydown', keyHandler, true);
+                if (window.app.canvas) {
+                    window.app.canvas.addEventListener('keydown', keyHandler, true);
+                }
+                window.addEventListener('keydown', keyHandler, true);
+                console.log('initFeatures: Keydown listeners added');
+                hookAppSaveMap();
+                patchShapeCreation();
+                getPixiLib();
+                probeGradient({});
+            }
+
+            const currentShapes = getSelectedShapes(true);
+            if (currentShapes.length === 0 && (forceIndividualMode || forceWholeMode)) {
+                forceIndividualMode = false;
+                forceWholeMode = false;
+                if (debugMode) console.log('initFeatures: Reset force modes (no selection)');
+            }
+
+            console.log('%c🎨 Mapmaker+ v777+ Fixed Loaded! 🚀');
+            console.log('• Arrows:movement');
+            console.log('• R/Q: Rotate 15° (Shift 90°)');
+            console.log('• 9/0: Eyedropper (top/bottom)');
+            console.log('• F: Toggle gradient flip');
+            console.log('• E: Toggle horizontal (90° rotation)');
+            console.log('• +/-: Resize prop (0.1x steps)');
+            console.log('• [ / ]: Transparency (0.1 steps)');
+            console.log('• Z/C: Z-Index (+/-10)');
+
+            console.log('initFeatures: Complete - Features active');
+        } catch (e) {
+            console.error('initFeatures error:', e);
+            setTimeout(initFeatures, 2000);
+        }
+    }
+
+
+    function restoreProps(shape) {
+        if (!enableRestore) {
+            if (debugMode) console.log('restoreProps: SKIPPED (disabled via toggle)');
+            return false;
+        }
+        if (!shape || !shape.id) return false;
+        const soObj = window.app?.screenObjects?.[shape.id.toString()];
+        if (!soObj) return false;
+
+        let restored = false;
+
+        if ((shape.type === 'H' || shape.type === 'P') && soObj.scale) {
+            shape.scale.x = soObj.scale.x || 1.0;
+            shape.scale.y = soObj.scale.y || 1.0;
+            restored = true;
+
+            if (shape._size && shape._size.width && shape._size.height) {
+                const posX = shape.position ? shape.position.x : (shape.x || 0);
+                const posY = shape.position ? shape.position.y : (shape.y || 0);
+                const baseWidth = shape._size.width;
+                const baseHeight = shape._size.height;
+                const centerX = posX + (baseWidth * 1.0) / 2;
+                const centerY = posY + (baseHeight * 1.0) / 2;
+                const newWidth = baseWidth * shape.scale.x;
+                const newHeight = baseHeight * shape.scale.y;
+                const newPosX = centerX - newWidth / 2;
+                const newPosY = centerY - newHeight / 2;
+                if (shape.position) {
+                    shape.position.x = newPosX;
+                    shape.position.y = newPosY;
+                } else {
+                    shape.x = newPosX;
+                    shape.y = newPosY;
+                }
+            }
+        }
+
+        if (soObj.opacity !== undefined) {
+            const savedOpacity = soObj.opacity;
+            if (shape.type === 'Bg') {
+                shape.alpha = savedOpacity;
+                if (shape._opacity !== undefined) shape._opacity = savedOpacity;
+                let fillObj = shape.shape || shape.lines || shape;
+                if (fillObj._fillStyle) fillObj._fillStyle.alpha = savedOpacity;
+                fillObj.alpha = savedOpacity;
+                shape.alpha = savedOpacity;
+                if (shape.container && shape.container.children) {
+                    shape.container.children.forEach(child => {
+                        if (child.alpha !== undefined) child.alpha = savedOpacity;
+                        if (child._fillStyle) child._fillStyle.alpha = savedOpacity;
+                    });
+                }
+                if (typeof shape.redraw === 'function') {
+                    shape.redraw();
+                    setTimeout(() => shape.redraw(), 50);
+                }
+                window.app.worldDirty = true;
+                if (window.app.backgroundLayer) window.app.backgroundLayer.dirty = true;
+                if (debugMode) {
+                    console.log(`🔍 restoreProps Bg ID ${shape.id}: Set opacity to ${savedOpacity.toFixed(1)} (alpha: ${shape.alpha}, _opacity: ${shape._opacity})`);
+                }
+            } else if (shape.points) {
+                let fillObj = shape.shape || shape.lines || shape;
+                if (fillObj._fillStyle) fillObj._fillStyle.alpha = savedOpacity;
+                fillObj.alpha = savedOpacity;
+                if (typeof shape.redraw === 'function') {
+                    shape.redraw();
+                    setTimeout(() => shape.redraw(), 50);
+                }
+            } else {
+                shape.alpha = savedOpacity;
+            }
+            restored = true;
+        }
+
+        if (soObj.zIndex !== undefined) {
+            shape.zIndex = soObj.zIndex;
+            if (shape.parent) {
+                shape.parent.sortableChildren = true;
+                shape.parent.sortChildren();
+            }
+            restored = true;
+        }
+
+        if (soObj.settings && soObj.settings.collidable !== undefined && shape.settings) {
+            shape.settings.collidable = soObj.settings.collidable;
+            if (typeof shape.redraw === 'function') {
+                shape.redraw();
+                setTimeout(() => shape.redraw(), 50);
+            }
+            restored = true;
+        }
+
+        if (soObj.hSType !== undefined && shape.type === 'H') {
+            shape.hSType = soObj.hSType;
+            if (typeof shape.redraw === 'function') {
+                shape.redraw();
+                setTimeout(() => shape.redraw(), 50);
+            }
+            restored = true;
+        }
+
+        if (restored && debugMode) console.log(`restoreProps: Applied to ID ${shape.id} (${shape.type})`);
+        return restored;
+    }
+    function runRestoreOnLoad() {
+        if (!enableRestore) {
+            if (debugMode) console.log('runRestoreOnLoad: SKIPPED (disabled)');
+            return;
+        }
+        if (!window.app) {
+            console.log('runRestoreOnLoad: app not ready - retrying in 2s');
+            setTimeout(runRestoreOnLoad, 2000);
+            return;
+        }
+
+        const layers = window.app.layers || [];
+        let restoredCount = 0;
+        layers.forEach((layer, layerIdx) => {
+            if (layer && layer.children && layer.children.length > 0) {
+                layer.children.forEach(child => {
+                    if (child.id && (child.type === 'H' || child.type === 'P' || child.type === 'Bg' || child.points)) {
+                        if (restoreProps(child)) restoredCount++;
+                    }
+                });
+                if (debugMode) console.log(`runRestoreOnLoad: Scanned Layer ${layerIdx} (${layer.children.length} children)`);
+            }
+        });
+
+        if (layers.length === 0 && window.pixiApp?.stage?.children) {
+            window.pixiApp.stage.children.forEach(child => {
+                if (child.id && (child.type === 'H' || child.type === 'P' || child.type === 'Bg' || child.points)) {
+                    if (restoreProps(child)) restoredCount++;
+                }
+            });
+        }
+
+        if (debugMode) console.log(`runRestoreOnLoad: Complete - Restored ${restoredCount} shapes (scale/opacity/zIndex from screenObjects)`);
+        window.app.worldDirty = false;
+        refreshCanvasBounds();
+    }
+    setTimeout(runRestoreOnLoad, 1500);
+    setTimeout(runRestoreOnLoad, 3000);
+    setTimeout(runRestoreOnLoad, 5000);
+
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(initFeatures, 1000); 
+        });
+    } else {
+        setTimeout(initFeatures, 1000);
+    }
+
+    window.addEventListener('beforeunload', () => {
+        if (keyHandler) {
+            document.removeEventListener('keydown', keyHandler, true);
+            if (window.app?.canvas) {
+                window.app.canvas.removeEventListener('keydown', keyHandler, true);
+            }
+            window.removeEventListener('keydown', keyHandler, true);
+            console.log('Cleanup: Key listeners removed');
+        }
+    });
+
+    window.getSelectedShape = getSelectedShape;
+    window.getSelectedShapes = getSelectedShapes;
+    window.bakedChanges = bakedChanges;
+    window.refreshCanvasBounds = refreshCanvasBounds;
+    window.applyNudge = applyNudge;
+    console.log('Script: Exposed getSelectedShape, getSelectedShapes, bakedChanges, refreshCanvasBounds, applyNudge globally');
+
+    console.log('IIFE closed');
+})();
+
+
+
+
+
+
+const link = document.createElement('link');
+link.rel = 'stylesheet';
+link.href = 'https://fonts.googleapis.com/css2?family=Birthstone&display=swap';
+document.head.appendChild(link);
+(function() {
+    'use strict';
+
+    // Debugg
+    const debugMode = false;
+
+    // Themes, you may customize as you wish :)
+    const themes = {
+
+
+        raspberry: `
+            body, html {
+                background-color: #F8E1E9 !important;
+                color: #C2185B !important;
+                font-family: Arial, sans-serif !important;
+            }
+            .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+            .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+            .left-sidebar, .tools, .m-section, .list {
+                background-color: rgba(248, 225, 233, 0.9) !important;
+                border: 1px solid #F06292 !important;
+                color: #C2185B !important;
+                box-shadow: 0 2px 8px rgba(240, 98, 146, 0.2) !important;
+            }
+            button, .button, input[type="button"], .btn, [class*="button"],
+            .icon-button {
+                background-color: #F8BBD9 !important;
+                border: 0px solid #F06292 !important;
+                color: #C2185B !important;
+                border-radius: 4px !important;
+                padding: 3px 14px !important;
+                cursor: pointer !important;
+            }
+            div.name {
+                color: #C2185B !important;
+            }
+            .main-menu, .map-info, .map-creator, .name {
+                color: #880E4F !important;
+            }
+            .main-menu .menu .menu-item {
+                padding: 0 15px;
+                font-size: 1em;
+                color: #880E4F;
+                cursor: default;
+                height: 22px;
+                line-height: 22px;
+            }
+            .main-menu .map-info .map-name .id {
+                font-size: .8em;
+                color: #880E4F;
+                margin-right: 3px;
+            }
+            .col-6 {
+                width: 50%;
+            }
+            button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+                background-color: #F06292 !important;
+                transform: translateY(-1px) !important;
+                box-shadow: 0 2px 4px rgba(240, 98, 146, 0.3) !important;
+            }
+            button:active, .button:active, .btn:active, .icon-button:active {
+                background-color: #AD1457 !important;
+                transform: translateY(0) !important;
+            }
+            .btn.icon-button.on {
+                background-color: #F06292 !important;
+                box-shadow: inset 0 2px 4px rgba(240, 98, 146, 0.2) !important;
+            }
+            .btn.icon-button, .btn.icon-button.on {
+                padding: 4px !important;
+                width: 24px !important;
+                height: 24px !important;
+                min-width: unset !important;
+                font-size: 16px !important;
+                color: #C2185B !important;
+                line-height: 1 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                transform: scale(0.9) !important;
+            }
+            .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+                font-size: 16px !important;
+                width: 16px !important;
+                height: 16px !important;
+            }
+            .btn.icon-button:hover {
+                transform: scale(1.0) !important;
+            }
+            input, select, textarea, input.inline {
+                background-color: #F8E1E9 !important;
+                border: 1px solid #F06292 !important;
+                color: #C2185B !important;
+                border-radius: 4px !important;
+                padding: 6px !important;
+            }
+            input:focus, select:focus, textarea:focus, input.inline:focus {
+                outline: 2px solid #F8BBD9 !important;
+                border-color: #F8BBD9 !important;
+            }
+            .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+                background-color: #F8BBD9 !important;
+                border-bottom: 1px solid #F06292 !important;
+                color: #C2185B !important;
+            }
+            .world-settings .setting .key[data-v-815b0b66] {
+                color: #5D1B3A;
+                text-align: left;
+            }
+            .world-settings .content[data-v-815b0b66] {
+                font-size: .8em;
+                color: #C2185B;
+            }
+            .layers .list .layer .meta .name[data-v-f9c33b4a] {
+                font-size: .88em;
+            }
+            .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+                --tw-text-opacity: 1;
+                color: rgb(255 255 255);
+                background-color: #AD1457;
+                padding: 4px 11px 1px;
+                font-size: .9em;
+                border-radius: 0 2px 0 0;
+            }
+            .layer-item, .selected-item, ul[class*="list"], li,
+            .tool, .has-tooltip {
+                background-color: rgba(248, 225, 233, 0.7) !important;
+                border: 1px solid #F06292 !important;
+                color: #C2185B !important;
+                border-radius: 4px !important;
+            }
+            .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+                background-color: #F8BBD9 !important;
+                transform: scale(1.05) !important;
+            }
+            .tool.active {
+                background-color: #F06292 !important;
+                border-color: #AD1457 !important;
+                box-shadow: 0 0 0 2px rgba(240, 98, 146, 0.4) !important;
+            }
+            i.material-icon, .material-icon {
+                color: #C2185B !important;
+                fill: #C2185B !important;
+                background-color: transparent !important;
+            }
+            .tool:hover i.material-icon {
+                color: #F8BBD9 !important;
+            }
+            .canvas-container, #gameCanvas, canvas {
+                background-color: transparent !important;
+            }
+            .canvas-overlay, .selection-box, .grid {
+                border-color: #F8BBD9 !important;
+                background-color: rgba(248, 187, 217, 0.2) !important;
+            }
+            ::-webkit-scrollbar {
+                width: 8px !important;
+            }
+            ::-webkit-scrollbar-track {
+                background: #F8E1E9 !important;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #F8BBD9 !important;
+                border-radius: 4px !important;
+            }
+            ::-webkit-scrollbar-thumb:hover {
+                background: #F06292 !important;
+            }
+            [class*="dark"], .dark-theme, body.dark {
+                background-color: #F8E1E9 !important;
+                filter: hue-rotate(0deg) brightness(1) !important;
+            }
+            #layers-panel, #tools-panel, .property-panel,
+            .reaction-panel {
+                background: linear-gradient(to bottom, #F8E1E9, #F8BBD9) !important;
+            }
+            .save-button, .load-button, .export-button {
+                background: #F8BBD9 !important;
+                color: #C2185B !important;
+            }
+            .children-inline {
+                background-color: rgba(248, 225, 233, 0.5) !important;
+            }
+            * {
+                transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+            }
+        `,
+
+        cachalot: `
+            body, html {
+                background-color: #40445a !important;
+                color: #d1d4db !important;
+                font-family: Arial, sans-serif !important;
+            }
+            .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+            .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+            .left-sidebar, .tools, .m-section, .list {
+                background-color: rgba(64, 68, 90, 0.9) !important;
+                border: 1px solid #323949 !important;
+                color: #d1d4db !important;
+                box-shadow: 0 2px 8px rgba(50, 57, 73, 0.3) !important;
+            }
+            button, .button, input[type="button"], .btn, [class*="button"] {
+                background-color: #5a5f7f !important;
+                border: 0px solid #323949 !important;
+                color: #d1d4db !important;
+                border-radius: 4px !important;
+                padding: 3px 14px !important;
+                cursor: pointer !important;
+                transition: background-color 0.3s ease, color 0.3s ease !important;
+            }
+            .icon-button {
+                background-color: transparent !important;
+                color: #323949 !important;
+                border: none !important;
+                padding: 4px !important;
+                width: 24px !important;
+                height: 24px !important;
+                min-width: unset !important;
+                font-size: 16px !important;
+                line-height: 1 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                transform: scale(0.9) !important;
+                transition: color 0.3s ease !important;
+            }
+            .icon-button:hover {
+                color: #5a5f7f !important;
+                transform: scale(1.0) !important;
+            }
+            .btn.icon-button.on {
+                background-color: #323949 !important;
+                box-shadow: inset 0 2px 4px rgba(50, 57, 73, 0.2) !important;
+                color: #d1d4db !important;
+            }
+            div.name {
+                color: #d1d4db !important;
+            }
+            .main-menu, .map-info, .map-creator, .name {
+                color: #b0b4c1 !important;
+            }
+            .main-menu .menu .menu-item {
+                padding: 0 15px;
+                font-size: 1em;
+                color: #b0b4c1;
+                cursor: default;
+                height: 22px;
+                line-height: 22px;
+            }
+            .main-menu .map-info .map-name .id {
+                font-size: .8em;
+                color: #b0b4c1;
+                margin-right: 3px;
+            }
+            .col-6 {
+                width: 50%;
+            }
+            button:hover, .button:hover, input[type="button"]:hover, .btn:hover {
+                background-color: #323949 !important;
+                transform: translateY(-1px) !important;
+                box-shadow: 0 2px 4px rgba(50, 57, 73, 0.4) !important;
+            }
+            button:active, .button:active, .btn:active {
+                background-color: #1F2430 !important;
+                transform: translateY(0) !important;
+            }
+            input, select, textarea, input.inline {
+                background-color: #40445a !important;
+                border: 1px solid #323949 !important;
+                color: #d1d4db !important;
+                border-radius: 4px !important;
+                padding: 6px !important;
+            }
+            input:focus, select:focus, textarea:focus, input.inline:focus {
+                outline: 2px solid #5a5f7f !important;
+                border-color: #5a5f7f !important;
+            }
+            .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+                background-color: #5a5f7f !important;
+                border-bottom: 1px solid #323949 !important;
+                color: #d1d4db !important;
+            }
+            .world-settings .setting .key[data-v-815b0b66] {
+                color: #b0b4c1;
+                text-align: left;
+            }
+            .world-settings .content[data-v-815b0b66] {
+                font-size: .8em;
+                color: #d1d4db;
+            }
+            .layers .list .layer .meta .name[data-v-f9c33b4a] {
+                font-size: .88em;
+            }
+            .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+                --tw-text-opacity: 1;
+                color: rgb(255 255 255);
+                background-color: #1F2430;
+                padding: 4px 11px 1px;
+                font-size: .9em;
+                border-radius: 0 2px 0 0;
+            }
+            .layer-item, .selected-item, ul[class*="list"], li,
+            .tool, .has-tooltip {
+                background-color: rgba(64, 68, 90, 0.7) !important;
+                border: 1px solid #323949 !important;
+                color: #d1d4db !important;
+                border-radius: 4px !important;
+            }
+            .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+                background-color: #5a5f7f !important;
+                transform: scale(1.05) !important;
+            }
+            .tool.active {
+                background-color: #323949 !important;
+                border-color: #1F2430 !important;
+                box-shadow: 0 0 0 2px rgba(50, 57, 73, 0.4) !important;
+            }
+            i.material-icon, .material-icon {
+                color: #181820 !important;
+                fill: #323949 !important;
+                background-color: transparent !important;
+                transition: color 0.3s ease !important;
+            }
+            .tool:hover i.material-icon {
+                color: #5a5f7f !important;
+            }
+            .canvas-container, #gameCanvas, canvas {
+                background-color: transparent !important;
+            }
+            .canvas-overlay, .selection-box, .grid {
+                border-color: #5a5f7f !important;
+                background-color: rgba(90, 95, 127, 0.2) !important;
+            }
+            ::-webkit-scrollbar {
+                width: 8px !important;
+            }
+            ::-webkit-scrollbar-track {
+                background: #40445a !important;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #5a5f7f !important;
+                border-radius: 4px !important;
+            }
+            ::-webkit-scrollbar-thumb:hover {
+                background: #323949 !important;
+            }
+            [class*="dark"], .dark-theme, body.dark {
+                background-color: #40445a !important;
+                filter: hue-rotate(0deg) brightness(1) !important;
+            }
+            #layers-panel, #tools-panel, .property-panel,
+            .reaction-panel {
+                background: linear-gradient(to bottom, #40445a, #5a5f7f) !important;
+            }
+            .save-button, .load-button, .export-button {
+                background: #5a5f7f !important;
+                color: #d1d4db !important;
+            }
+            .children-inline {
+                background-color: rgba(64, 68, 90, 0.5) !important;
+            }
+            * {
+                transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+            }
+        `,
+
+        pink: `
+            body, html {
+                background-color: #F3CFC6 !important;
+                color: #4A2C2C !important;
+                font-family: "Birthstone", cursive; !important;
+                font-size: .96em;
+            }
+            .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+            .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+            .left-sidebar, .tools, .m-section, .list {
+                background-color: rgba(243, 207, 198, 0.9) !important;
+                border: 1px solid #D9A8A0 !important;
+                color: #4A2C2C !important;
+                box-shadow: 0 2px 8px rgba(217, 168, 160, 0.3) !important;
+            }
+            button, .button, input[type="button"], .btn, [class*="button"],
+            .icon-button {
+                background-color: #E8B8B0 !important;
+                border: 0px solid #D9A8A0 !important;
+                color: #4A2C2C !important;
+                border-radius: 4px !important;
+                padding: 3px 14px !important;
+                cursor: pointer !important;
+            }
+            div.name {
+                color: #4A2C2C !important;
+            }
+            .main-menu, .map-info, .map-creator, .name {
+                color: #292929 !important;
+            }
+            .main-menu .menu .menu-item {
+                padding: 0 15px;
+                font-size: 1em;
+                color: #292929;
+                cursor: default;
+                height: 22px;
+                line-height: 22px;
+            }
+            .main-menu .map-info .map-name .id {
+                font-size: .8em;
+                color: #292929;
+                margin-right: 3px;
+            }
+            .col-6 {
+                width: 50%;
+            }
+            button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+                background-color: #D9A8A0 !important;
+                transform: translateY(-1px) !important;
+                box-shadow: 0 2px 4px rgba(217, 168, 160, 0.4) !important;
+            }
+            button:active, .button:active, .btn:active, .icon-button:active {
+                background-color: #C89F90 !important;
+                transform: translateY(0) !important;
+            }
+            .btn.icon-button.on {
+                background-color: #D9A8A0 !important;
+                box-shadow: inset 0 2px 4px rgba(217, 168, 160, 0.3) !important;
+            }
+            .btn.icon-button, .btn.icon-button.on {
+                padding: 4px !important;
+                width: 24px !important;
+                height: 24px !important;
+                min-width: unset !important;
+                font-size: 16px !important;
+                color: #4A2C2C !important;
+                line-height: 1 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                transform: scale(0.9) !important;
+            }
+            .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+                font-size: 16px !important;
+                width: 16px !important;
+                height: 16px !important;
+            }
+            .btn.icon-button:hover {
+                transform: scale(1.0) !important;
+            }
+            input, select, textarea, input.inline {
+                background-color: #F0E6E0 !important;
+                border: 1px solid #D9A8A0 !important;
+                color: #4A2C2C !important;
+                border-radius: 4px !important;
+                padding: 6px !important;
+            }
+            input:focus, select:focus, textarea:focus, input.inline:focus {
+                outline: 2px solid #E8B8B0 !important;
+                border-color: #E8B8B0 !important;
+            }
+            .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+                background-color: #E8B8B0 !important;
+                border-bottom: 1px solid #D9A8A0 !important;
+                color: #4A2C2C !important;
+            }
+            .world-settings .setting .key[data-v-815b0b66] {
+                color: #111111;
+                text-align: left;
+            }
+            .world-settings .content[data-v-815b0b66] {
+                font-size: .8em;
+                color: #352423;
+            }
+            .layers .list .layer .meta .name[data-v-f9c33b4a] {
+                font-size: .88em;
+            }
+            .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+                --tw-text-opacity: 1;
+                color: rgb(255 255 255);
+                background-color: #634348;
+                padding: 4px 11px 1px;
+                font-size: .9em;
+                border-radius: 0 2px 0 0;
+            }
+            .layer-item, .selected-item, ul[class*="list"], li,
+            .tool, .has-tooltip {
+                background-color: rgba(243, 207, 198, 0.7) !important;
+                border: 1px solid #D9A8A0 !important;
+                color: #4A2C2C !important;
+                border-radius: 4px !important;
+            }
+            .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+                background-color: #E8B8B0 !important;
+                transform: scale(1.05) !important;
+            }
+            .tool.active {
+                background-color: #D9A8A0 !important;
+                border-color: #C89F90 !important;
+                box-shadow: 0 0 0 2px rgba(217, 168, 160, 0.5) !important;
+            }
+            i.material-icon, .material-icon {
+                color: #4A2C2C !important;
+                fill: #4A2C2C !important;
+                background-color: transparent !important;
+            }
+            .tool:hover i.material-icon {
+                color: #E8B8B0 !important;
+            }
+            .canvas-container, #gameCanvas, canvas {
+                background-color: transparent !important;
+            }
+            .canvas-overlay, .selection-box, .grid {
+                border-color: #E8B8B0 !important;
+                background-color: rgba(232, 184, 176, 0.2) !important;
+            }
+            ::-webkit-scrollbar {
+                width: 8px !important;
+            }
+            ::-webkit-scrollbar-track {
+                background: #F3CFC6 !important;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #E8B8B0 !important;
+                border-radius: 4px !important;
+            }
+            ::-webkit-scrollbar-thumb:hover {
+                background: #D9A8A0 !important;
+            }
+            [class*="dark"], .dark-theme, body.dark {
+                background-color: #F3CFC6 !important;
+                filter: hue-rotate(0deg) brightness(1) !important;
+            }
+            #layers-panel, #tools-panel, .property-panel,
+            .reaction-panel {
+                background: linear-gradient(to bottom, #F3CFC6, #E8B8B0) !important;
+            }
+            .save-button, .load-button, .export-button {
+                background: #E8B8B0 !important;
+                color: #4A2C2C !important;
+            }
+            .children-inline {
+                background-color: rgba(243, 207, 198, 0.5) !important;
+            }
+            * {
+                transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+            }
+        `,
+        blue: `
+            body, html {
+                background-color: #D0E7F9 !important;
+                color: #1B2A49 !important;
+                font-family: Arial, sans-serif !important;
+            }
+            .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+            .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+            .left-sidebar, .tools, .m-section, .list {
+                background-color: rgba(208, 231, 249, 0.9) !important;
+                border: 1px solid #7AA7D9 !important;
+                color: #1B2A49 !important;
+                box-shadow: 0 2px 8px rgba(122, 167, 217, 0.3) !important;
+            }
+            button, .button, input[type="button"], .btn, [class*="button"],
+            .icon-button {
+                background-color: #A3C1E1 !important;
+                border: 0px solid #7AA7D9 !important;
+                color: #1B2A49 !important;
+                border-radius: 4px !important;
+                padding: 3px 14px !important;
+                cursor: pointer !important;
+            }
+            div.name {
+                color: #1B2A49 !important;
+            }
+            .main-menu, .map-info, .map-creator, .name {
+                color: #0F1B2A !important;
+            }
+            .main-menu .menu .menu-item {
+                padding: 0 15px;
+                font-size: 1em;
+                color: #0F1B2A;
+                cursor: default;
+                height: 22px;
+                line-height: 22px;
+            }
+            .main-menu .map-info .map-name .id {
+                font-size: .8em;
+                color: #0F1B2A;
+                margin-right: 3px;
+            }
+            .col-6 {
+                width: 50%;
+            }
+            button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+                background-color: #7AA7D9 !important;
+                transform: translateY(-1px) !important;
+                box-shadow: 0 2px 4px rgba(122, 167, 217, 0.4) !important;
+            }
+            button:active, .button:active, .btn:active, .icon-button:active {
+                background-color: #5C8AC3 !important;
+                transform: translateY(0) !important;
+            }
+            .btn.icon-button.on {
+                background-color: #7AA7D9 !important;
+                box-shadow: inset 0 2px 4px rgba(122, 167, 217, 0.3) !important;
+            }
+            .btn.icon-button, .btn.icon-button.on {
+                padding: 4px !important;
+                width: 24px !important;
+                height: 24px !important;
+                min-width: unset !important;
+                font-size: 16px !important;
+                color: #1B2A49 !important;
+                line-height: 1 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                transform: scale(0.9) !important;
+            }
+            .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+                font-size: 16px !important;
+                width: 16px !important;
+                height: 16px !important;
+            }
+            .btn.icon-button:hover {
+                transform: scale(1.0) !important;
+            }
+            input, select, textarea, input.inline {
+                background-color: #D9E6F7 !important;
+                border: 1px solid #7AA7D9 !important;
+                color: #1B2A49 !important;
+                border-radius: 4px !important;
+                padding: 6px !important;
+            }
+            input:focus, select:focus, textarea:focus, input.inline:focus {
+                outline: 2px solid #A3C1E1 !important;
+                border-color: #A3C1E1 !important;
+            }
+            .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+                background-color: #A3C1E1 !important;
+                border-bottom: 1px solid #7AA7D9 !important;
+                color: #1B2A49 !important;
+            }
+            .world-settings .setting .key[data-v-815b0b66] {
+                color: #0A1A2B;
+                text-align: left;
+            }
+            .world-settings .content[data-v-815b0b66] {
+                font-size: .8em;
+                color: #1B2A49;
+            }
+            .layers .list .layer .meta .name[data-v-f9c33b4a] {
+                font-size: .88em;
+            }
+            .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+                --tw-text-opacity: 1;
+                color: rgb(255 255 255);
+                background-color: #2A4A7B;
+                padding: 4px 11px 1px;
+                font-size: .9em;
+                border-radius: 0 2px 0 0;
+            }
+            .layer-item, .selected-item, ul[class*="list"], li,
+            .tool, .has-tooltip {
+                background-color: rgba(208, 231, 249, 0.7) !important;
+                border: 1px solid #7AA7D9 !important;
+                color: #1B2A49 !important;
+                border-radius: 4px !important;
+            }
+            .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+                background-color: #A3C1E1 !important;
+                transform: scale(1.05) !important;
+            }
+            .tool.active {
+                background-color: #7AA7D9 !important;
+                border-color: #5C8AC3 !important;
+                box-shadow: 0 0 0 2px rgba(122, 167, 217, 0.5) !important;
+            }
+            i.material-icon, .material-icon {
+                color: #1B2A49 !important;
+                fill: #1B2A49 !important;
+                background-color: transparent !important;
+            }
+            .tool:hover i.material-icon {
+                color: #A3C1E1 !important;
+            }
+            .canvas-container, #gameCanvas, canvas {
+                background-color: transparent !important;
+            }
+            .canvas-overlay, .selection-box, .grid {
+                border-color: #A3C1E1 !important;
+                background-color: rgba(163, 193, 225, 0.2) !important;
+            }
+            ::-webkit-scrollbar {
+                width: 8px !important;
+            }
+            ::-webkit-scrollbar-track {
+                background: #D0E7F9 !important;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #A3C1E1 !important;
+                border-radius: 4px !important;
+            }
+            ::-webkit-scrollbar-thumb:hover {
+                background: #7AA7D9 !important;
+            }
+            [class*="dark"], .dark-theme, body.dark {
+                background-color: #D0E7F9 !important;
+                filter: hue-rotate(0deg) brightness(1) !important;
+            }
+            #layers-panel, #tools-panel, .property-panel,
+            .reaction-panel {
+                background: linear-gradient(to bottom, #D0E7F9, #A3C1E1) !important;
+            }
+            .save-button, .load-button, .export-button {
+                background: #A3C1E1 !important;
+                color: #1B2A49 !important;
+            }
+            .children-inline {
+                background-color: rgba(208, 231, 249, 0.5) !important;
+            }
+            * {
+                transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+            }
+        `,
+
+        green: `
+            /* Green theme CSS */
+            body, html {
+                background-color: #DFF3E3 !important;
+                color: #2B4D2B !important;
+                font-family: Arial, sans-serif !important;
+            }
+            .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+            .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+            .left-sidebar, .tools, .m-section, .list {
+                background-color: rgba(223, 243, 227, 0.9) !important;
+                border: 1px solid #8BC48B !important;
+                color: #2B4D2B !important;
+                box-shadow: 0 2px 8px rgba(139, 196, 139, 0.3) !important;
+            }
+            button, .button, input[type="button"], .btn, [class*="button"],
+            .icon-button {
+                background-color: #A9D3A9 !important;
+                border: 0px solid #8BC48B !important;
+                color: #2B4D2B !important;
+                border-radius: 4px !important;
+                padding: 3px 14px !important;
+                cursor: pointer !important;
+            }
+            div.name {
+                color: #2B4D2B !important;
+            }
+            .main-menu, .map-info, .map-creator, .name {
+                color: #1B3A1B !important;
+            }
+            .main-menu .menu .menu-item {
+                padding: 0 15px;
+                font-size: 1em;
+                color: #1B3A1B;
+                cursor: default;
+                height: 22px;
+                line-height: 22px;
+            }
+            .main-menu .map-info .map-name .id {
+                font-size: .8em;
+                color: #1B3A1B;
+                margin-right: 3px;
+            }
+            .col-6 {
+                width: 50%;
+            }
+            button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+                background-color: #8BC48B !important;
+                transform: translateY(-1px) !important;
+                box-shadow: 0 2px 4px rgba(139, 196, 139, 0.4) !important;
+            }
+            button:active, .button:active, .btn:active, .icon-button:active {
+                background-color: #6FA86F !important;
+                transform: translateY(0) !important;
+            }
+            .btn.icon-button.on {
+                background-color: #8BC48B !important;
+                box-shadow: inset 0 2px 4px rgba(139, 196, 139, 0.3) !important;
+            }
+            .btn.icon-button, .btn.icon-button.on {
+                padding: 4px !important;
+                width: 24px !important;
+                height: 24px !important;
+                min-width: unset !important;
+                font-size: 16px !important;
+                color: #2B4D2B !important;
+                line-height: 1 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                transform: scale(0.9) !important;
+            }
+            .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+                font-size: 16px !important;
+                width: 16px !important;
+                height: 16px !important;
+            }
+            .btn.icon-button:hover {
+                transform: scale(1.0) !important;
+            }
+            input, select, textarea, input.inline {
+                background-color: #E6F0E6 !important;
+                border: 1px solid #8BC48B !important;
+                color: #2B4D2B !important;
+                border-radius: 4px !important;
+                padding: 6px !important;
+            }
+            input:focus, select:focus, textarea:focus, input.inline:focus {
+                outline: 2px solid #A9D3A9 !important;
+                border-color: #A9D3A9 !important;
+            }
+            .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+                background-color: #A9D3A9 !important;
+                border-bottom: 1px solid #8BC48B !important;
+                color: #2B4D2B !important;
+            }
+            .world-settings .setting .key[data-v-815b0b66] {
+                color: #1B3A1B;
+                text-align: left;
+            }
+            .world-settings .content[data-v-815b0b66] {
+                font-size: .8em;
+                color: #2B4D2B;
+            }
+            .layers .list .layer .meta .name[data-v-f9c33b4a] {
+                font-size: .88em;
+            }
+            .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+                --tw-text-opacity: 1;
+                color: rgb(255 255 255);
+                background-color: #3A6B3A;
+                padding: 4px 11px 1px;
+                font-size: .9em;
+                border-radius: 0 2px 0 0;
+            }
+            .layer-item, .selected-item, ul[class*="list"], li,
+            .tool, .has-tooltip {
+                background-color: rgba(223, 243, 227, 0.7) !important;
+                border: 1px solid #8BC48B !important;
+                color: #2B4D2B !important;
+                border-radius: 4px !important;
+            }
+            .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+                background-color: #A9D3A9 !important;
+                transform: scale(1.05) !important;
+            }
+            .tool.active {
+                background-color: #8BC48B !important;
+                border-color: #6FA86F !important;
+                box-shadow: 0 0 0 2px rgba(139, 196, 139, 0.5) !important;
+            }
+            i.material-icon, .material-icon {
+                color: #2B4D2B !important;
+                fill: #2B4D2B !important;
+                background-color: transparent !important;
+            }
+            .tool:hover i.material-icon {
+                color: #A9D3A9 !important;
+            }
+            .canvas-container, #gameCanvas, canvas {
+                background-color: transparent !important;
+            }
+            .canvas-overlay, .selection-box, .grid {
+                border-color: #A9D3A9 !important;
+                background-color: rgba(169, 211, 169, 0.2) !important;
+            }
+            ::-webkit-scrollbar {
+                width: 8px !important;
+            }
+            ::-webkit-scrollbar-track {
+                background: #DFF3E3 !important;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #A9D3A9 !important;
+                border-radius: 4px !important;
+            }
+            ::-webkit-scrollbar-thumb:hover {
+                background: #8BC48B !important;
+            }
+            [class*="dark"], .dark-theme, body.dark {
+                background-color: #DFF3E3 !important;
+                filter: hue-rotate(0deg) brightness(1) !important;
+            }
+            #layers-panel, #tools-panel, .property-panel,
+            .reaction-panel {
+                background: linear-gradient(to bottom, #DFF3E3, #A9D3A9) !important;
+            }
+            .save-button, .load-button, .export-button {
+                background: #A9D3A9 !important;
+                color: #2B4D2B !important;
+            }
+            .children-inline {
+                background-color: rgba(223, 243, 227, 0.5) !important;
+            }
+            * {
+                transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+            }
+        `,
+        whark: `
+            body, html {
+                background-color: #fffde7 !important;
+                color: #424242 !important;
+                font-family: Arial, sans-serif !important;
+            }
+            .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+            .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+            .left-sidebar, .tools, .m-section, .list {
+                background-color: rgba(255, 253, 231, 0.9) !important;
+                border: 1px solid #ffff66 !important;
+                color: #424242 !important;
+                box-shadow: 0 2px 8px rgba(255, 255, 102, 0.2) !important;
+            }
+            button, .button, input[type="button"], .btn, [class*="button"] {
+                background-color: #ffffb6 !important;
+                border: 0px solid #ffffb6 !important;
+                color: #424242 !important;
+                border-radius: 4px !important;
+                padding: 3px 14px !important;
+                cursor: pointer !important;
+                transition: background-color 0.3s ease, color 0.3s ease !important;
+            }
+            .icon-button {
+                background-color: transparent !important;
+                color: #ffffb6 !important;
+                border: none !important;
+                padding: 4px !important;
+                width: 24px !important;
+                height: 24px !important;
+                min-width: unset !important;
+                font-size: 16px !important;
+                line-height: 1 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                transform: scale(0.9) !important;
+                transition: color 0.3s ease !important;
+            }
+            .icon-button:hover {
+                color: #fffb00 !important;
+                transform: scale(1.0) !important;
+            }
+            .btn.icon-button.on {
+                background-color: #ffffb6 !important;
+                box-shadow: inset 0 2px 4px rgba(255, 255, 102, 0.2) !important;
+                color: #424242 !important;
+            }
+            div.name {
+                color: #424242 !important;
+            }
+            .main-menu, .map-info, .map-creator, .name {
+                color: #616161 !important;
+            }
+            .main-menu .menu .menu-item {
+                padding: 0 15px;
+                font-size: 1em;
+                color: #616161;
+                cursor: default;
+                height: 22px;
+                line-height: 22px;
+            }
+            .main-menu .map-info .map-name .id {
+                font-size: .8em;
+                color: #616161;
+                margin-right: 3px;
+            }
+            .col-6 {
+                width: 50%;
+            }
+            button:hover, .button:hover, input[type="button"]:hover, .btn:hover {
+                background-color: #fffb00 !important;
+                transform: translateY(-1px) !important;
+                box-shadow: 0 2px 4px rgba(255, 255, 102, 0.3) !important;
+            }
+            button:active, .button:active, .btn:active {
+                background-color: #fffb00 !important;
+                transform: translateY(0) !important;
+            }
+            input, select, textarea, input.inline {
+                background-color: #fffde7 !important;
+                border: 1px solid #ffffb6 !important;
+                color: #424242 !important;
+                border-radius: 4px !important;
+                padding: 6px !important;
+            }
+            input:focus, select:focus, textarea:focus, input.inline:focus {
+                outline: 2px solid #ffffb6 !important;
+                border-color: #ffffb6 !important;
+            }
+            .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+                background-color: #ffffb6 !important;
+                border-bottom: 1px solid #fffb00 !important;
+                color: #424242 !important;
+            }
+            .world-settings .setting .key[data-v-815b0b66] {
+                color: #616161;
+                text-align: left;
+            }
+            .world-settings .content[data-v-815b0b66] {
+                font-size: .8em;
+                color: #424242;
+            }
+            .layers .list .layer .meta .name[data-v-f9c33b4a] {
+                font-size: .88em;
+            }
+            .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+                --tw-text-opacity: 1;
+                color: rgb(66 66 66);
+                background-color: #fae781;
+                padding: 4px 11px 1px;
+                font-size: .9em;
+                border-radius: 0 2px 0 0;
+            }
+            .layer-item, .selected-item, ul[class*="list"], li,
+            .tool, .has-tooltip {
+                background-color: rgba(255, 253, 231, 0.7) !important;
+                border: 1px solid #ffffb6 !important;
+                color: #424242 !important;
+                border-radius: 4px !important;
+            }
+            .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+                background-color: #ffffb6 !important;
+                transform: scale(1.05) !important;
+            }
+            .tool.active {
+                background-color: #fffb00 !important;
+                border-color: #fae781 !important;
+                box-shadow: 0 0 0 2px rgba(255, 255, 102, 0.4) !important;
+            }
+            i.material-icon, .material-icon {
+                color: #b7fca3 !important;
+                fill: #b7fca3 !important;
+                background-color: transparent !important;
+                transition: color 0.3s ease !important;
+            }
+            .tool:hover i.material-icon {
+                color: #fffb00 !important;
+            }
+            .canvas-container, #gameCanvas, canvas {
+                background-color: transparent !important;
+            }
+            .canvas-overlay, .selection-box, .grid {
+                border-color: #ffffb6 !important;
+                background-color: rgba(255, 255, 102, 0.2) !important;
+            }
+            ::-webkit-scrollbar {
+                width: 8px !important;
+            }
+            ::-webkit-scrollbar-track {
+                background: #fffde7 !important;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #ffffb6 !important;
+                border-radius: 4px !important;
+            }
+            ::-webkit-scrollbar-thumb:hover {
+                background: #fffb00 !important;
+            }
+            [class*="dark"], .dark-theme, body.dark {
+                background-color: #fffde7 !important;
+                filter: hue-rotate(0deg) brightness(1) !important;
+            }
+            #layers-panel, #tools-panel, .property-panel,
+            .reaction-panel {
+                background: linear-gradient(to bottom, #fffde7, #ffffb6) !important;
+            }
+            .save-button, .load-button, .export-button {
+                background: #ffffb6 !important;
+                color: #424242 !important;
+            }
+            .children-inline {
+                background-color: rgba(255, 253, 231, 0.5) !important;
+            }
+            * {
+                transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+            }
+        `,
+        fiveColorTheme: `
+    /* 5-Color Theme with distinct colors for different elements */
+    body, html {
+        background-color: #3F220F !important; /* Very Dark Brown */
+        color: #E71D36 !important; /* Bright Red text */
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #AF4319 !important; /* Dark Orange-Brown */
+        border: 1px solid #771414 !important; /* Dark Red-Brown border */
+        color: #E71D36 !important; /* Bright Red text */
+        box-shadow: 0 6px 12px rgba(231, 29, 54, 0.5) !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #771414 !important; /* Dark Red-Brown */
+        border: 0px solid #771414 !important;
+        color: #E71D36 !important; /* Bright Red */
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+    }
+    div.name {
+        color: #E71D36 !important; /* Bright Red */
+    }
+    .main-menu, .map-info, .map-creator, .name {
+        color: #19180A !important; /* Almost Black Brown */
+    }
+    .main-menu .menu .menu-item {
+        padding: 0 15px;
+        font-size: 1em;
+        color: #19180A;
+        cursor: default;
+        height: 22px;
+        line-height: 22px;
+    }
+    .main-menu .map-info .map-name .id {
+        font-size: .8em;
+        color: #E71D36;
+        margin-right: 3px;
+    }
+    .col-6 {
+        width: 50%;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #E71D36 !important; /* Bright Red */
+        transform: translateY(-1px) !important;
+        box-shadow: 0 2px 4px rgba(231, 29, 54, 0.7) !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #AF4319 !important; /* Dark Orange-Brown */
+        transform: translateY(0) !important;
+    }
+    .btn.icon-button.on {
+        background-color: #E71D36 !important; /* Bright Red */
+        box-shadow: inset 0 2px 4px rgba(231, 29, 54, 0.4) !important;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        padding: 4px !important;
+        width: 24px !important;
+        height: 24px !important;
+        min-width: unset !important;
+        font-size: 16px !important;
+        color: #E71D36 !important; /* Bright Red */
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        transform: scale(0.9) !important;
+    }
+    .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+        font-size: 16px !important;
+        width: 16px !important;
+        height: 16px !important;
+    }
+    .btn.icon-button:hover {
+        transform: scale(1.0) !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #19180A !important; /* Almost Black Brown */
+        border: 1px solid #771414 !important; /* Dark Red-Brown */
+        color: #E71D36 !important; /* Bright Red */
+        border-radius: 4px !important;
+        padding: 6px !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #E71D36 !important; /* Bright Red */
+        border-color: #E71D36 !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #771414 !important; /* Dark Red-Brown */
+        border-bottom: 1px solid #AF4319 !important; /* Dark Orange-Brown */
+        color: #E71D36 !important; /* Bright Red */
+    }
+    .world-settings .setting .key[data-v-815b0b66] {
+        color: #E71D36;
+        text-align: left;
+    }
+    .world-settings .content[data-v-815b0b66] {
+        font-size: .8em;
+        color: #E71D36;
+    }
+    .layers .list .layer .meta .name[data-v-f9c33b4a] {
+        font-size: .88em;
+    }
+    .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+        --tw-text-opacity: 1;
+        color: rgb(255 255 255);
+        background-color: #AF4319; /* Dark Orange-Brown */
+        padding: 4px 11px 1px;
+        font-size: .9em;
+        border-radius: 0 2px 0 0;
+    }
+    .layer-item, .selected-item, ul[class*="list"], li,
+    .tool, .has-tooltip {
+        background-color: #771414 !important; /* Dark Red-Brown */
+        border: 1px solid #AF4319 !important; /* Dark Orange-Brown */
+        color: #E71D36 !important; /* Bright Red */
+        border-radius: 4px !important;
+    }
+    .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+        background-color: #E71D36 !important; /* Bright Red */
+        transform: scale(1.05) !important;
+    }
+    .tool.active {
+        background-color: #AF4319 !important; /* Dark Orange-Brown */
+        border-color: #3F220F !important; /* Very Dark Brown */
+        box-shadow: 0 0 0 2px rgba(231, 29, 54, 0.5) !important;
+    }
+    i.material-icon, .material-icon {
+        color: #E71D36 !important; /* Bright Red */
+        fill: #E71D36 !important;
+        background-color: transparent !important;
+    }
+    .tool:hover i.material-icon {
+        color: #AF4319 !important; /* Dark Orange-Brown */
+    }
+    .canvas-container, #gameCanvas, canvas {
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #E71D36 !important; /* Bright Red */
+        background-color: rgba(231, 29, 54, 0.2) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #3F220F !important; /* Very Dark Brown */
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #AF4319 !important; /* Dark Orange-Brown */
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #E71D36 !important; /* Bright Red */
+    }
+    [class*="dark"], .dark-theme, body.dark {
+        background-color: #19180A !important; /* Almost Black Brown */
+        filter: none !important;
+    }
+    #layers-panel, #tools-panel, .property-panel,
+    .reaction-panel {
+        background-color: #AF4319 !important; /* Dark Orange-Brown */
+    }
+    .save-button, .load-button, .export-button {
+        background: #771414 !important; /* Dark Red-Brown */
+        color: #E71D36 !important; /* Bright Red */
+    }
+    .children-inline {
+        background-color: #3F220F !important; /* Very Dark Brown */
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`,
+        fedeTheme: `
+    /* Fede Theme - 5 distinct colors, no gradients, no filters */
+    body, html {
+        background-color: #CADBC0 !important; /* Light Mint Green */
+        color: #393D3F !important; /* Dark Slate Gray text */
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #E36397 !important; /* Soft Pink */
+        border: 1px solid #447604 !important; /* Deep Green border */
+        color: #D3D3D3 !important; /* Dark Slate Gray text */
+        box-shadow: 0 6px 12px rgba(68, 118, 4, 0.4) !important;
+        border-radius: 6px !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #F79256 !important; /* Warm Orange */
+        border: 0px solid #F79256 !important;
+        color: #D3D3D3 !important; /* Dark Slate Gray */
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+        font-weight: 600 !important;
+        box-shadow: 0 2px 6px rgba(68, 118, 4, 0.5) !important;
+        transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #E36397 !important; /* Soft Pink */
+        box-shadow: 0 4px 12px rgba(68, 118, 4, 0.7) !important;
+        transform: translateY(-2px) !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #447604 !important; /* Deep Green */
+        transform: translateY(0) !important;
+        box-shadow: 0 1px 4px rgba(68, 118, 4, 0.4) !important;
+    }
+    div.name {
+        color: #D3D3D3 !important; /* Dark Slate Gray */
+        font-weight: 700 !important;
+    }
+    .main-menu, .map-info, .map-creator, .name {
+        color: #447604 !important; /* Deep Green */
+    }
+    .main-menu .menu .menu-item {
+        padding: 0 15px;
+        font-size: 1em;
+        color: #447604;
+        cursor: default;
+        height: 22px;
+        line-height: 22px;
+    }
+    .main-menu .map-info .map-name .id {
+        font-size: .8em;
+        color: #F79256;
+        margin-right: 3px;
+    }
+    .col-6 {
+        width: 50%;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        padding: 4px !important;
+        width: 24px !important;
+        height: 24px !important;
+        min-width: unset !important;
+        font-size: 16px !important;
+        color: #393D3F !important; /* Dark Slate Gray */
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 4px !important;
+        background-color: #F79256 !important; /* Warm Orange */
+        box-shadow: 0 2px 6px rgba(68, 118, 4, 0.5) !important;
+        transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+    }
+    .btn.icon-button:hover {
+        background-color: #E36397 !important; /* Soft Pink */
+        box-shadow: 0 4px 12px rgba(68, 118, 4, 0.7) !important;
+        transform: scale(1.1) !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #CADBC0 !important; /* Light Mint Green */
+        border: 1px solid #447604 !important; /* Deep Green */
+        color: #393D3F !important; /* Dark Slate Gray */
+        border-radius: 4px !important;
+        padding: 6px !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #F79256 !important; /* Warm Orange */
+        border-color: #F79256 !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #447604 !important; /* Deep Green */
+        border-bottom: 1px solid #393D3F !important; /* Dark Slate Gray */
+        color: #CADBC0 !important; /* Light Mint Green */
+    }
+    .world-settings .setting .key[data-v-815b0b66] {
+        color: #447604;
+        text-align: left;
+    }
+    .world-settings .content[data-v-815b0b66] {
+        font-size: .8em;
+        color: #393D3F;
+    }
+    .layers .list .layer .meta .name[data-v-f9c33b4a] {
+        font-size: .88em;
+    }
+    .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+        color: rgb(255 255 255);
+        background-color: #E36397; /* Soft Pink */
+        padding: 4px 11px 1px;
+        font-size: .9em;
+        border-radius: 0 2px 0 0;
+    }
+    .layer-item, .selected-item, ul[class*="list"], li,
+    .tool, .has-tooltip {
+        background-color: #393D3F !important; /* Dark Slate Gray */
+        border: 1px solid #447604 !important; /* Deep Green */
+        color: #CADBC0 !important; /* Light Mint Green */
+        border-radius: 4px !important;
+    }
+    .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+        background-color: #F79256 !important; /* Warm Orange */
+        transform: scale(1.05) !important;
+    }
+    .tool.active {
+        background-color: #E36397 !important; /* Soft Pink */
+        border-color: #447604 !important; /* Deep Green */
+        box-shadow: 0 0 0 2px rgba(231, 146, 86, 0.5) !important;
+    }
+    i.material-icon, .material-icon {
+        color: #D3D3D3 !important; /* Dark Slate Gray */
+        fill: #393D3F !important;
+        background-color: transparent !important;
+    }
+    .tool:hover i.material-icon {
+        color: #F79256 !important; /* Warm Orange */
+    }
+    .canvas-container, #gameCanvas, canvas {
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #F79256 !important; /* Warm Orange */
+        background-color: rgba(247, 146, 86, 0.2) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #CADBC0 !important; /* Light Mint Green */
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #447604 !important; /* Deep Green */
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #E36397 !important; /* Soft Pink */
+    }
+    [class*="dark"], .dark-theme, body.dark {
+        background-color: #393D3F !important; /* Dark Slate Gray */
+        filter: none !important;
+    }
+    #layers-panel, #tools-panel, .property-panel,
+    .reaction-panel {
+        background-color: #E36397 !important; /* Soft Pink */
+    }
+    .save-button, .load-button, .export-button {
+        background: #447604 !important; /* Deep Green */
+        color: #CADBC0 !important; /* Light Mint Green */
+    }
+    .children-inline {
+        background-color: #393D3F !important; /* Dark Slate Gray */
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`,
+        rainbowTheme: `
+    /* Rainbow Theme - distinct rainbow colors, no gradients, no filters */
+    body, html {
+        background-color: #0000FF !important; /* Blue background */
+        color: #FFFF00 !important; /* Yellow text */
+        font-family: Blippo, fantasy !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #FF7F00 !important; /* Orange */
+        border: 1px solid #FF0000 !important; /* Red border */
+        color: #FFFF00 !important; /* Yellow text */
+        box-shadow: 0 6px 12px rgba(255, 127, 0, 0.5) !important;
+        border-radius: 6px !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #FF0000 !important; /* Red */
+        border: 0px solid #FF0000 !important;
+        color: #FFFF00 !important; /* Yellow */
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+        font-weight: 600 !important;
+        box-shadow: 0 2px 6px rgba(255, 0, 0, 0.5) !important;
+        transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #00FF00 !important; /* Green */
+        box-shadow: 0 4px 12px rgba(0, 255, 0, 0.7) !important;
+        transform: translateY(-2px) !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #0000FF !important; /* Blue */
+        transform: translateY(0) !important;
+        box-shadow: 0 1px 4px rgba(0, 0, 255, 0.4) !important;
+    }
+    div.name {
+        color: #FFFF00 !important; /* Yellow */
+        font-weight: 700 !important;
+    }
+    .main-menu, .map-info, .map-creator, .name {
+        color: #FF7F00 !important; /* Orange */
+    }
+    .main-menu .menu .menu-item {
+        padding: 0 15px;
+        font-size: 1em;
+        color: #FF7F00;
+        cursor: default;
+        height: 22px;
+        line-height: 22px;
+    }
+    .main-menu .map-info .map-name .id {
+        font-size: .8em;
+        color: #00FF00;
+        margin-right: 3px;
+    }
+    .col-6 {
+        width: 50%;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        padding: 4px !important;
+        width: 24px !important;
+        height: 24px !important;
+        min-width: unset !important;
+        font-size: 16px !important;
+        color: #FFFF00 !important; /* Yellow */
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 4px !important;
+        background-color: #FF0000 !important; /* Red */
+        box-shadow: 0 2px 6px rgba(255, 0, 0, 0.5) !important;
+        transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+    }
+    .btn.icon-button:hover {
+        background-color: #00FF00 !important; /* Green */
+        box-shadow: 0 4px 12px rgba(0, 255, 0, 0.7) !important;
+        transform: scale(1.1) !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #0000FF !important;
+        border: 1px solid #FF7F00 !important; /* Orange */
+        color: #FFFF00 !important; /* Yellow */
+        border-radius: 4px !important;
+        padding: 6px !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #FF0000 !important; /* Red */
+        border-color: #FF0000 !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #00FF00 !important; /* Green */
+        border-bottom: 1px solid #393D3F !important; /* Dark slate gray */
+        color: #FFFF00 !important; /* Yellow */
+    }
+    .world-settings .setting .key[data-v-815b0b66] {
+        color: #FF7F00;
+        text-align: left;
+    }
+    .world-settings .content[data-v-815b0b66] {
+        font-size: .8em;
+        color: #FFFF00;
+    }
+    .layers .list .layer .meta .name[data-v-f9c33b4a] {
+        font-size: .88em;
+    }
+    .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+        color: rgb(255 255 255);
+        background-color: #FF0000; /* Red */
+        padding: 4px 11px 1px;
+        font-size: .9em;
+        border-radius: 0 2px 0 0;
+    }
+    .layer-item, .selected-item, ul[class*="list"], li,
+    .tool, .has-tooltip {
+        background-color: #0000FF !important;
+        border: 1px solid #FF7F00 !important; /* Orange */
+        color: #FFFF00 !important; /* Yellow */
+        border-radius: 4px !important;
+    }
+    .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+        background-color: #FF0000 !important; /* Red */
+        transform: scale(1.05) !important;
+    }
+    .tool.active {
+        background-color: #00FF00 !important; /* Green */
+        border-color: #0000FF !important; /* Dark slate gray */
+        box-shadow: 0 0 0 2px rgba(0, 255, 0, 0.5) !important;
+    }
+    i.material-icon, .material-icon {
+        color: #FFFF00 !important; /* Yellow */
+        fill: #FFFF00 !important;
+        background-color: transparent !important;
+    }
+    .tool:hover i.material-icon {
+        color: #FF7F00 !important; /* Orange */
+    }
+    .canvas-container, #gameCanvas, canvas {
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #FF0000 !important; /* Red */
+        background-color: rgba(255, 0, 0, 0.2) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #0000FF !important; /* Dark slate gray */
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #FF7F00 !important; /* Orange */
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #FFFF00 !important; /* Yellow */
+    }
+    [class*="dark"], .dark-theme, body.dark {
+        background-color: #000000 !important; /* Black */
+        filter: none !important;
+    }
+    #layers-panel, #tools-panel, .property-panel,
+    .reaction-panel {
+        background-color: #FF7F00 !important; /* Orange */
+    }
+    .save-button, .load-button, .export-button {
+        background: #00FF00 !important; /* Green */
+        color: #393D3F !important; /* Dark slate gray */
+    }
+    .children-inline {
+        background-color: #0000FF !important; /* Dark slate gray */
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s
+        `,
+
+
+
+        redYellow: `
+    /* Red-Yellow Gradient Theme */
+    body, html {
+        background-color: #FFF4E0 !important;
+        color: #5A1A00 !important;
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background: linear-gradient(180deg, #FF6F3C 0%, #FFD966 100%) !important;
+        border: 1px solid #E07B39 !important;
+        color: #5A1A00 !important;
+        box-shadow: 0 2px 8px rgba(224, 123, 57, 0.4) !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #FF9A4D !important;
+        border: 0px solid #E07B39 !important;
+        color: #5A1A00 !important;
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+    }
+    div.name {
+        color: #5A1A00 !important;
+    }
+    .main-menu, .map-info, .map-creator, .name {
+        color: #4A1300 !important;
+    }
+    .main-menu .menu .menu-item {
+        padding: 0 15px;
+        font-size: 1em;
+        color: #4A1300;
+        cursor: default;
+        height: 22px;
+        line-height: 22px;
+    }
+    .main-menu .map-info .map-name .id {
+        font-size: .8em;
+        color: #4A1300;
+        margin-right: 3px;
+    }
+    .col-6 {
+        width: 50%;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #E07B39 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 2px 4px rgba(224, 123, 57, 0.6) !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #B35E2B !important;
+        transform: translateY(0) !important;
+    }
+    .btn.icon-button.on {
+        background-color: #E07B39 !important;
+        box-shadow: inset 0 2px 4px rgba(224, 123, 57, 0.4) !important;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        padding: 4px !important;
+        width: 24px !important;
+        height: 24px !important;
+        min-width: unset !important;
+        font-size: 16px !important;
+        color: #5A1A00 !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        transform: scale(0.9) !important;
+    }
+    .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+        font-size: 16px !important;
+        width: 16px !important;
+        height: 16px !important;
+    }
+    .btn.icon-button:hover {
+        transform: scale(1.0) !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #FFE9B3 !important;
+        border: 1px solid #E07B39 !important;
+        color: #5A1A00 !important;
+        border-radius: 4px !important;
+        padding: 6px !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #FF9A4D !important;
+        border-color: #FF9A4D !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #FF9A4D !important;
+        border-bottom: 1px solid #E07B39 !important;
+        color: #5A1A00 !important;
+    }
+    .world-settings .setting .key[data-v-815b0b66] {
+        color: #4A1300;
+        text-align: left;
+    }
+    .world-settings .content[data-v-815b0b66] {
+        font-size: .8em;
+        color: #5A1A00;
+    }
+    .layers .list .layer .meta .name[data-v-f9c33b4a] {
+        font-size: .88em;
+    }
+    .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+        --tw-text-opacity: 1;
+        color: rgb(255 255 255);
+        background-color: #B35E2B;
+        padding: 4px 11px 1px;
+        font-size: .9em;
+        border-radius: 0 2px 0 0;
+    }
+    .layer-item, .selected-item, ul[class*="list"], li,
+    .tool, .has-tooltip {
+        background-color: rgba(255, 154, 77, 0.7) !important;
+        border: 1px solid #E07B39 !important;
+        color: #5A1A00 !important;
+        border-radius: 4px !important;
+    }
+    .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+        background-color: #FF9A4D !important;
+        transform: scale(1.05) !important;
+    }
+    .tool.active {
+        background-color: #E07B39 !important;
+        border-color: #B35E2B !important;
+        box-shadow: 0 0 0 2px rgba(224, 123, 57, 0.5) !important;
+    }
+    i.material-icon, .material-icon {
+        color: #5A1A00 !important;
+        fill: #5A1A00 !important;
+        background-color: transparent !important;
+    }
+    .tool:hover i.material-icon {
+        color: #FF9A4D !important;
+    }
+    .canvas-container, #gameCanvas, canvas {
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #FF9A4D !important;
+        background-color: rgba(255, 154, 77, 0.2) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #FFF4E0 !important;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #FF9A4D !important;
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #E07B39 !important;
+    }
+    [class*="dark"], .dark-theme, body.dark {
+        background-color: #FFF4E0 !important;
+        filter: hue-rotate(10deg) brightness(1.05) !important;
+    }
+    #layers-panel, #tools-panel, .property-panel,
+    .reaction-panel {
+        background: linear-gradient(to bottom, #FF6F3C, #FFD966) !important;
+    }
+    .save-button, .load-button, .export-button {
+        background: #FF9A4D !important;
+        color: #5A1A00 !important;
+    }
+    .children-inline {
+        background-color: rgba(255, 154, 77, 0.5) !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`,
+        nice: `
+    /* nice - soft, warm, and comfortable */
+    @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600&display=swap');
+
+    body, html {
+        background-color: #F5F3F1 !important; /* Warm light gray */
+        color: #3B3A36 !important; /* Dark slate gray */
+        font-family: 'Open Sans', Arial, sans-serif !important;
+        font-size: 16px !important;
+        line-height: 1.5 !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #E6E2DF !important; /* Soft beige */
+        border: 1px solid #C9C5C1 !important; /* Light gray border */
+        color: #3B3A36 !important;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.05) !important;
+        border-radius: 8px !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #6CA0A3 !important; /* Muted teal */
+        border: none !important;
+        color: #F5F3F1 !important; /* Light text */
+        border-radius: 24px !important;
+        padding: 8px 20px !important;
+        cursor: pointer !important;
+        font-weight: 600 !important;
+        box-shadow: 0 3px 6px rgba(108, 160, 163, 0.5) !important;
+        transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #5B8B8E !important; /* Darker teal */
+        box-shadow: 0 6px 12px rgba(91, 139, 142, 0.7) !important;
+        transform: translateY(-2px) !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #4A7578 !important; /* Even darker teal */
+        transform: translateY(0) !important;
+        box-shadow: 0 2px 4px rgba(74, 117, 120, 0.4) !important;
+    }
+    div.name {
+        color: #3B3A36 !important;
+        font-weight: 700 !important;
+    }
+    .main-menu, .map-info, .map-creator, .name {
+        color: #A66B6B !important; /* Soft coral */
+    }
+    .main-menu .menu .menu-item {
+        padding: 0 15px;
+        font-size: 1em;
+        color: #A66B6B;
+        cursor: default;
+        height: 22px;
+        line-height: 22px;
+    }
+    .main-menu .map-info .map-name .id {
+        font-size: .8em;
+        color: #D99A9A;
+        margin-right: 3px;
+    }
+    .col-6 {
+        width: 50%;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        padding: 6px !important;
+        width: 28px !important;
+        height: 28px !important;
+        min-width: unset !important;
+        font-size: 18px !important;
+        color: #F5F3F1 !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 50% !important;
+        background-color: #6CA0A3 !important;
+        box-shadow: 0 3px 6px rgba(108, 160, 163, 0.5) !important;
+        transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+    }
+    .btn.icon-button:hover {
+        background-color: #5B8B8E !important;
+        box-shadow: 0 6px 12px rgba(91, 139, 142, 0.7) !important;
+        transform: scale(1.1) !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #F5F3F1 !important;
+        border: 1px solid #C9C5C1 !important;
+        color: #3B3A36 !important;
+        border-radius: 8px !important;
+        padding: 10px !important;
+        font-weight: 500 !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #A66B6B !important;
+        border-color: #A66B6B !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #D9D4D1 !important;
+        border-bottom: 1px solid #C9C5C1 !important;
+        color: #3B3A36 !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05) !important;
+    }
+    .world-settings .setting .key[data-v-815b0b66] {
+        color: #A66B6B;
+        text-align: left;
+    }
+    .world-settings .content[data-v-815b0b66] {
+        font-size: .8em;
+        color: #3B3A36;
+    }
+    .layers .list .layer .meta .name[data-v-f9c33b4a] {
+        font-size: .88em;
+    }
+    .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+        color: #F5F3F1;
+        background-color: #A66B6B;
+        padding: 4px 11px 1px;
+        font-size: .9em;
+        border-radius: 0 2px 0 0;
+        box-shadow: 0 2px 6px rgba(166, 107, 107, 0.5);
+    }
+    .layer-item, .selected-item, ul[class*="list"], li,
+    .tool, .has-tooltip {
+        background-color: #F5F3F1 !important;
+        border: 1px solid #C9C5C1 !important;
+        color: #3B3A36 !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05) !important;
+    }
+    .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+        background-color: #D9D4D1 !important;
+        transform: scale(1.03) !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
+    }
+    .tool.active {
+        background-color: #A66B6B !important;
+        border-color: #6C4A4A !important;
+        box-shadow: 0 0 0 2px rgba(166, 107, 107, 0.6) !important;
+    }
+    i.material-icon, .material-icon {
+        color: #3B3A36 !important;
+        fill: #3B3A36 !important;
+        background-color: transparent !important;
+    }
+    .tool:hover i.material-icon {
+        color: #A66B6B !important;
+    }
+    .canvas-container, #gameCanvas, canvas {
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #A66B6B !important;
+        background-color: rgba(166, 107, 107, 0.15) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #F5F3F1 !important;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #A66B6B !important;
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #6C4A4A !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`,
+        aihosh: `
+    /* ai Gradient Theme */
+    body, html {
+        background-color: #3B1A6D !important; /* Dark purple base */
+        color: #F0C0FF !important; /* Light fuchsia text */
+        font-family: Brush Script MT, Brush Script Std, cursive !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background: linear-gradient(180deg, #1c0333 0%, #FF00FF 100%) !important;
+        border: 1px solid #9B00CC !important;
+        color: #F0C0FF !important;
+        box-shadow: 0 6px 12px rgba(255, 0, 255, 0.5) !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #9B00CC !important;
+        border: 0px solid #9B00CC !important;
+        color: #F0C0FF !important;
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+    }
+    div.name {
+        color: #F0C0FF !important;
+    }
+    .main-menu, .map-info, .map-creator, .name {
+        color: #1c0333 !important;
+    }
+    .main-menu .menu .menu-item {
+        padding: 0 15px;
+        font-size: 1em;
+        color: #1c0333;
+        cursor: default;
+        height: 22px;
+        line-height: 22px;
+    }
+    .main-menu .map-info .map-name .id {
+        font-size: .8em;
+        color: #D580FF;
+        margin-right: 3px;
+    }
+    .col-6 {
+        width: 50%;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #FF00FF !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 2px 4px rgba(255, 0, 255, 0.7) !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #7A0080 !important;
+        transform: translateY(0) !important;
+    }
+    .btn.icon-button.on {
+        background-color: #FF00FF !important;
+        box-shadow: inset 0 2px 4px rgba(255, 0, 255, 0.4) !important;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        padding: 4px !important;
+        width: 24px !important;
+        height: 24px !important;
+        min-width: unset !important;
+        font-size: 16px !important;
+        color: #F0C0FF !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        transform: scale(0.9) !important;
+    }
+    .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+        font-size: 16px !important;
+        width: 16px !important;
+        height: 16px !important;
+    }
+    .btn.icon-button:hover {
+        transform: scale(1.0) !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #CFA0FF !important;
+        border: 1px solid #9B00CC !important;
+        color: #3B1A6D !important;
+        border-radius: 4px !important;
+        padding: 6px !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #FF00FF !important;
+        border-color: #FF00FF !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #9B00CC !important;
+        border-bottom: 1px solid #7A0080 !important;
+        color: #F0C0FF !important;
+    }
+    .world-settings .setting .key[data-v-815b0b66] {
+        color: #D580FF;
+        text-align: left;
+    }
+    .world-settings .content[data-v-815b0b66] {
+        font-size: .8em;
+        color: #F0C0FF;
+    }
+    .layers .list .layer .meta .name[data-v-f9c33b4a] {
+        font-size: .88em;
+    }
+    .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+        --tw-text-opacity: 1;
+        color: rgb(255 255 255);
+        background-color: #601f9e;
+        padding: 4px 11px 1px;
+        font-size: .9em;
+        border-radius: 0 2px 0 0;
+    }
+    .layer-item, .selected-item, ul[class*="list"], li,
+    .tool, .has-tooltip {
+        background-color: rgba(155, 0, 255, 0.7) !important;
+        border: 1px solid #9B00CC !important;
+        color: #F0C0FF !important;
+        border-radius: 4px !important;
+    }
+    .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+        background-color: #FF00FF !important;
+        transform: scale(1.05) !important;
+    }
+    .tool.active {
+        background-color: #9B00CC !important;
+        border-color: #7A0080 !important;
+        box-shadow: 0 0 0 2px rgba(255, 0, 255, 0.5) !important;
+    }
+    i.material-icon, .material-icon {
+        color: #F0C0FF !important;
+        fill: #F0C0FF !important;
+        background-color: transparent !important;
+    }
+    .tool:hover i.material-icon {
+        color: #FF00FF !important;
+    }
+    .canvas-container, #gameCanvas, canvas {
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #FF00FF !important;
+        background-color: rgba(255, 0, 255, 0.2) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #3B1A6D !important;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #9B00CC !important;
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #FF00FF !important;
+    }
+    [class*="dark"], .dark-theme, body.dark {
+        background-color: #1c0333 !important;
+        filter: hue-rotate(10deg) brightness(1.1) !important;
+    }
+    #layers-panel, #tools-panel, .property-panel,
+    .reaction-panel {
+        background: linear-gradient(to bottom, #1c0333, #FF00FF) !important;
+    }
+    .save-button, .load-button, .export-button {
+        background: #9B00CC !important;
+        color: #F0C0FF !important;
+    }
+    .children-inline {
+        background-color: #1c0333 !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`, relaxationTheme: `
+    /* Relaxation Theme - Whites and Light Pinks with soft gradients */
+    body, html {
+        background-color: #F9F6F9 !important; /* Soft off-white */
+        color: #6B3B5A !important; /* Muted dark pink/purple text */
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background: linear-gradient(180deg, #FFE6F0 0%, #F9F6F9 100%) !important; /* Light pink to off-white */
+        border: 1px solid #D8B7C9 !important; /* Soft pink border */
+        color: #6B3B5A !important;
+        box-shadow: 0 6px 12px rgba(214, 182, 201, 0.4) !important;
+        border-radius: 6px !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #F7D9E3 !important; /* Light pink */
+        border: 0px solid #D8B7C9 !important;
+        color: #6B3B5A !important;
+        border-radius: 20px !important;
+        padding: 6px 18px !important;
+        cursor: pointer !important;
+        font-weight: 600 !important;
+        box-shadow: 0 2px 6px rgba(214, 182, 201, 0.5) !important;
+        transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #E8B9CC !important; /* Slightly deeper pink */
+        box-shadow: 0 4px 12px rgba(214, 182, 201, 0.7) !important;
+        transform: translateY(-2px) !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #D8A3B7 !important;
+        transform: translateY(0) !important;
+        box-shadow: 0 1px 4px rgba(214, 182, 201, 0.4) !important;
+    }
+    div.name {
+        color: #6B3B5A !important;
+        font-weight: 700 !important;
+    }
+    .main-menu, .map-info, .map-creator, .name {
+        color: #A97CA0 !important; /* Soft muted pink */
+    }
+    .main-menu .menu .menu-item {
+        padding: 0 15px;
+        font-size: 1em;
+        color: #A97CA0;
+        cursor: default;
+        height: 22px;
+        line-height: 22px;
+    }
+    .main-menu .map-info .map-name .id {
+        font-size: .8em;
+        color: #CFA6C9;
+        margin-right: 3px;
+    }
+    .col-6 {
+        width: 50%;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        padding: 4px !important;
+        width: 28px !important;
+        height: 28px !important;
+        min-width: unset !important;
+        font-size: 18px !important;
+        color: #6B3B5A !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 50% !important;
+        background-color: #F7D9E3 !important;
+        box-shadow: 0 2px 6px rgba(214, 182, 201, 0.5) !important;
+        transition: background-color 0.3s ease, box-shadow 0.3s ease !important;
+    }
+    .btn.icon-button:hover {
+        background-color: #E8B9CC !important;
+        box-shadow: 0 4px 12px rgba(214, 182, 201, 0.7) !important;
+        transform: scale(1.1) !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #F9F6F9 !important;
+        border: 1px solid #D8B7C9 !important;
+        color: #6B3B5A !important;
+        border-radius: 8px !important;
+        padding: 8px !important;
+        font-weight: 500 !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #E8B9CC !important;
+        border-color: #E8B9CC !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #F7D9E3 !important;
+        border-bottom: 1px solid #D8B7C9 !important;
+        color: #6B3B5A !important;
+        box-shadow: 0 2px 6px rgba(214, 182, 201, 0.3) !important;
+    }
+    .world-settings .setting .key[data-v-815b0b66] {
+        color: #A97CA0;
+        text-align: left;
+    }
+    .world-settings .content[data-v-815b0b66] {
+        font-size: .8em;
+        color: #6B3B5A;
+    }
+    .layers .list .layer .meta .name[data-v-f9c33b4a] {
+        font-size: .88em;
+    }
+    .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+        color: #fff;
+        background-color: #A97CA0;
+        padding: 4px 11px 1px;
+        font-size: .9em;
+        border-radius: 0 2px 0 0;
+        box-shadow: 0 2px 6px rgba(214, 182, 201, 0.5);
+    }
+    .layer-item, .selected-item, ul[class*="list"], li,
+    .tool, .has-tooltip {
+        background-color: #F9F6F9 !important;
+        border: 1px solid #D8B7C9 !important;
+        color: #6B3B5A !important;
+        border-radius: 6px !important;
+        box-shadow: 0 2px 6px rgba(214, 182, 201, 0.3) !important;
+    }
+    .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+        background-color: #E8B9CC !important;
+        transform: scale(1.03) !important;
+        box-shadow: 0 4px 12px rgba(214, 182, 201, 0.5) !important;
+    }
+    .tool.active {
+        background-color: #A97CA0 !important;
+        border-color: #6B3B5A !important;
+        box-shadow: 0 0 0 2px rgba(214, 182, 201, 0.6) !important;
+    }
+    i.material-icon, .material-icon {
+        color: #6B3B5A !important;
+        fill: #6B3B5A !important;
+        background-color: transparent !important;
+    }
+    .tool:hover i.material-icon {
+        color: #A97CA0 !important;
+    }
+    .canvas-container, #gameCanvas, canvas {
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #E8B9CC !important;
+        background-color: rgba(232, 185, 204, 0.2) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #F9F6F9 !important;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #A97CA0 !important;
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #6B3B5A !important;
+    }
+        [class*="dark"], .dark-theme, body.dark {
+        background-color: #2E1A47 !important;
+        filter: hue-rotate(0deg) brightness(1.2) !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`,
+
+        invertColors: `
+    /* Invert Colors Theme */
+    html, body {
+        filter: invert(1) hue-rotate(180deg) !important;
+        background-color: #000 !important;
+        color: #fff !important;
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #111 !important;
+        border-color: #888 !important;
+        color: #eee !important;
+        box-shadow: none !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #222 !important;
+        border: 1px solid #555 !important;
+        color: #eee !important;
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+        box-shadow: none !important;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #444 !important;
+        transform: none !important;
+        box-shadow: none !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #666 !important;
+        transform: none !important;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        color: #eee !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #222 !important;
+        border: 1px solid #555 !important;
+        color: #eee !important;
+        border-radius: 4px !important;
+        padding: 6px !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #888 !important;
+        border-color: #888 !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #222 !important;
+        border-bottom: 1px solid #555 !important;
+        color: #eee !important;
+    }
+    i.material-icon, .material-icon {
+        color: #eee !important;
+        fill: #eee !important;
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #888 !important;
+        background-color: rgba(255, 255, 255, 0.1) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #111 !important;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #555 !important;
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #777 !important;
+    }
+    [class*="dark"], .dark-theme, body.dark {
+        background-color: #1c0333 !important;
+        filter: hue-rotate(180deg) brightness(0.9) !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`,
+        psychedelic: `
+    /* psychedelic */
+    body, html {
+        background-color: #2E1A47 !important;
+        color: #D8C3E7 !important;
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background: linear-gradient(180deg, #4B367C 0%, #9B8AC7 100%) !important;
+        border: 1px solid #7A5DA8 !important;
+        color: #D8C3E7 !important;
+        box-shadow: 0 2px 8px rgba(155, 138, 199, 0.5) !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #7A5DA8 !important;
+        border: 0px solid #7A5DA8 !important;
+        color: #E6E0F8 !important;
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+    }
+    div.name {
+        color: #D8C3E7 !important;
+    }
+    .main-menu, .map-info, .map-creator, .name {
+        color: #C1B3D9 !important;
+    }
+    .main-menu .menu .menu-item {
+        padding: 0 15px;
+        font-size: 1em;
+        color: #C1B3D9;
+        cursor: default;
+        height: 22px;
+        line-height: 22px;
+    }
+    .main-menu .map-info .map-name .id {
+        font-size: .8em;
+        color: #C1B3D9;
+        margin-right: 3px;
+    }
+    .col-6 {
+        width: 50%;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #9B8AC7 !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 2px 4px rgba(155, 138, 199, 0.7) !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #6F5BA8 !important;
+        transform: translateY(0) !important;
+    }
+    .btn.icon-button.on {
+        background-color: #9B8AC7 !important;
+        box-shadow: inset 0 2px 4px rgba(155, 138, 199, 0.4) !important;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        padding: 4px !important;
+        width: 24px !important;
+        height: 24px !important;
+        min-width: unset !important;
+        font-size: 16px !important;
+        color: #D8C3E7 !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        transform: scale(0.9) !important;
+    }
+    .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+        font-size: 16px !important;
+        width: 16px !important;
+        height: 16px !important;
+    }
+    .btn.icon-button:hover {
+        transform: scale(1.0) !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #A89FD9 !important;
+        border: 1px solid #7A5DA8 !important;
+        color: #2E1A47 !important;
+        border-radius: 4px !important;
+        padding: 6px !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #9B8AC7 !important;
+        border-color: #9B8AC7 !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #7A5DA8 !important;
+        border-bottom: 1px solid #6F5BA8 !important;
+        color: #D8C3E7 !important;
+    }
+    .world-settings .setting .key[data-v-815b0b66] {
+        color: #E6E0F8;
+        text-align: left;
+    }
+    .world-settings .content[data-v-815b0b66] {
+        font-size: .8em;
+        color: #C1B3D9;
+    }
+    .layers .list .layer .meta .name[data-v-f9c33b4a] {
+        font-size: .88em;
+    }
+    .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+        --tw-text-opacity: 1;
+        color: rgb(255 255 255);
+        background-color: #4B367C;
+        padding: 4px 11px 1px;
+        font-size: .9em;
+        border-radius: 0 2px 0 0;
+    }
+    .layer-item, .selected-item, ul[class*="list"], li,
+    .tool, .has-tooltip {
+        background-color: rgba(155, 138, 199, 0.7) !important;
+        border: 1px solid #7A5DA8 !important;
+        color: #D8C3E7 !important;
+        border-radius: 4px !important;
+    }
+    .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+        background-color: #9B8AC7 !important;
+        transform: scale(1.05) !important;
+    }
+    .tool.active {
+        background-color: #7A5DA8 !important;
+        border-color: #6F5BA8 !important;
+        box-shadow: 0 0 0 2px rgba(155, 138, 199, 0.5) !important;
+    }
+    i.material-icon, .material-icon {
+        color: #D8C3E7 !important;
+        fill: #D8C3E7 !important;
+        background-color: transparent !important;
+    }
+    .tool:hover i.material-icon {
+        color: #A89FD9 !important;
+    }
+    .canvas-container, #gameCanvas, canvas {
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #9B8AC7 !important;
+        background-color: rgba(155, 138, 199, 0.2) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #2E1A47 !important;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #7A5DA8 !important;
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #9B8AC7 !important;
+    }
+    [class*="dark"], .dark-theme, body.dark {
+        background-color: #2E1A47 !important;
+        filter: hue-rotate(270deg) brightness(1.1) !important;
+    }
+    #layers-panel, #tools-panel, .property-panel,
+    .reaction-panel {
+        background: linear-gradient(to bottom, #2E1A47, #9B8AC7) !important;
+    }
+    .save-button, .load-button, .export-button {
+        background: #7A5DA8 !important;
+        color: #D8C3E7 !important;
+    }
+    .children-inline {
+        background-color: rgba(155, 138, 199, 0.5) !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`,
+        monochrome: `
+    /* Monochrome Theme */
+    body, html {
+        background-color: #f0f0f0 !important;
+        color: #222 !important;
+        font-family: Arial, sans-serif !important;
+        filter: grayscale(100%) !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #fff !important;
+        border: 1px solid #ccc !important;
+        color: #222 !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #ddd !important;
+        border: 1px solid #bbb !important;
+        color: #222 !important;
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+        box-shadow: none !important;
+    }
+    button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+        background-color: #bbb !important;
+        transform: none !important;
+        box-shadow: none !important;
+    }
+    button:active, .button:active, .btn:active, .icon-button:active {
+        background-color: #999 !important;
+        transform: none !important;
+    }
+    .btn.icon-button, .btn.icon-button.on {
+        color: #222 !important;
+    }
+    input, select, textarea, input.inline {
+        background-color: #eee !important;
+        border: 1px solid #ccc !important;
+        color: #222 !important;
+        border-radius: 4px !important;
+        padding: 6px !important;
+    }
+    input:focus, select:focus, textarea:focus, input.inline:focus {
+        outline: 2px solid #999 !important;
+        border-color: #999 !important;
+    }
+    .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+        background-color: #ddd !important;
+        border-bottom: 1px solid #bbb !important;
+        color: #222 !important;
+    }
+    i.material-icon, .material-icon {
+        color: #222 !important;
+        fill: #222 !important;
+        background-color: transparent !important;
+    }
+    .canvas-overlay, .selection-box, .grid {
+        border-color: #999 !important;
+        background-color: rgba(0, 0, 0, 0.05) !important;
+    }
+    ::-webkit-scrollbar {
+        width: 8px !important;
+    }
+    ::-webkit-scrollbar-track {
+        background: #f0f0f0 !important;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #bbb !important;
+        border-radius: 4px !important;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #999 !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+    }
+`,
+        sepiaTone: `
+    /* Sepia Tone Theme with black font */
+    html, body {
+        filter: sepia(0.6) contrast(1.1) brightness(0.95) !important;
+        background-color: #f4e6d7 !important;
+        color: #000000 !important; /* Changed to black */
+        font-family: Arial, sans-serif !important;
+    }
+    #editor .left-sidebar .tools .list .tool {
+    padding: 1px 3px 2px;
+    font-size: 1.3em;
+    cursor: pointer;
+    border-radius: 3px;
+    color: #595151;
+}
+.layers .list .layer[data-v-f9c33b4a] {
+    padding-left: .25rem;
+    padding-right: .25rem;
+    padding-top: .125rem;
+    padding-bottom: .125rem;
+    text-align: left;
+    cursor: pointer;
+    color: #4e4747;
+}
+.world-settings .setting .key[data-v-815b0b66] {
+    color: #5f5555;
+    text-align: left;
+}
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #f9f1e7 !important;
+        border: 1px solid #c9b59a !important;
+        color: #000000 !important; /* Changed to black */
+        box-shadow: 0 2px 8px rgba(201, 181, 154, 0.4) !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #d6b87a !important;
+        border: 0px solid #c9b59a !important;
+        color: #000000 !important; /* Changed to black */
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+    }
+    /* Additional UI elements styling can be added similarly */
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease !important;
+    }
+`,
+        coolBlueTint: `
+    /* Cool Blue Tint Theme with navy font */
+    html, body {
+        filter: brightness(1.1) contrast(1.2) saturate(1.3) hue-rotate(190deg) !important;
+        background-color: #e0f0ff !important;
+        color: #000080 !important; /* Changed to navy */
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #cce6ff !important;
+        border: 1px solid #3399ff !important;
+        color: #000080 !important; /* Changed to navy */
+        box-shadow: 0 2px 8px rgba(51, 153, 255, 0.4) !important;
+    }
+
+    #editor .left-sidebar .tools .list .tool {
+    padding: 1px 3px 2px;
+    font-size: 1.3em;
+    cursor: pointer;
+    border-radius: 3px;
+    color: #696969;
+    color: #000080 !important;
+}
+.world-settings .setting .key[data-v-815b0b66] {
+    color: #373434;
+    text-align: left;
+}
+
+.layers .list .layer .meta .name[data-v-f9c33b4a] {
+    color: #000080 !important;
+    font-size: .8em;
+}
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #3399ff !important;
+        border: 0px solid #3399ff !important;
+        color: #000080 !important; /* Changed to navy */
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease !important;
+    }
+`,
+        warmGlow: `
+    /* Warm Glow Theme with Bourbon font color */
+    html, body {
+        filter: brightness(1.15) saturate(1.2) sepia(0.3) hue-rotate(15deg) !important;
+        background-color: #fff8e1 !important;
+        color: #6F4B3E !important; /* Changed to Bourbon */
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #fff3cc !important;
+        border: 1px solid #cc9a4d !important;
+        color: #6F4B3E !important; /* Changed to Bourbon */
+        box-shadow: 0 2px 8px rgba(204, 154, 77, 0.4) !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #cc9a4d !important;
+        border: 0px solid #cc9a4d !important;
+        color: #6F4B3E !important; /* Changed to Bourbon */
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+    }
+    #editor .left-sidebar .tools .list .tool
+Specificity: (1,4,0)
+ {
+    padding: 1px 3px 2px;
+    font-size: 1.3em;
+    cursor: pointer;
+    border-radius: 3px;
+    color: #6F4B3E;
+}
+#editor .left-sidebar .tools .list .tool {
+    padding: 1px 3px 2px;
+    font-size: 1.3em;
+    cursor: pointer;
+    border-radius: 3px;
+    color: #6F4B3E;
+}
+.world-settings .setting .key[data-v-815b0b66] {
+    color: #6F4B3E;
+    text-align: left;
+}
+.layers .list .layer[data-v-f9c33b4a] {
+    padding-left: .25rem;
+    padding-right: .25rem;
+    padding-top: .125rem;
+    padding-bottom: .125rem;
+    text-align: left;
+    cursor: pointer;
+    color: #6F4B3E;
+}
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease !important;
+    }
+`,
+        highContrast: `
+    /* High Contrast Theme */
+    html, body {
+        filter: contrast(1.8) brightness(1.2) saturate(1.5) !important;
+        background-color: #000 !important;
+        color: #fff !important;
+        font-family: Arial, sans-serif !important;
+    }
+    .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+    .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+    .left-sidebar, .tools, .m-section, .list {
+        background-color: #222 !important;
+        border: 1px solid #fff !important;
+        color: #fff !important;
+        box-shadow: 0 2px 8px rgba(255, 255, 255, 0.6) !important;
+    }
+    button, .button, input[type="button"], .btn, [class*="button"],
+    .icon-button {
+        background-color: #444 !important;
+        border: 0px solid #fff !important;
+        color: #fff !important;
+        border-radius: 4px !important;
+        padding: 3px 14px !important;
+        cursor: pointer !important;
+    }
+    * {
+        transition: background-color 0.3s ease, color 0.3s ease !important;
+    }
+`
+    };
+
+    const themeKeys = Object.keys(themes);
+    const numThemes = themeKeys.length;
+    const giantSquid = numThemes;
+    const mymynewTheme = numThemes + 1;
+    const styleElement = document.createElement('style');
+    styleElement.id = 'mapmaker-theme-style';
+    document.head.appendChild(styleElement);
+    let currentThemeIndex = giantSquid;
+    const savedThemeIndex = localStorage.getItem('MYdefaultThemeIndex');
+    if (savedThemeIndex !== null && !isNaN(savedThemeIndex)) {
+        const idx = parseInt(savedThemeIndex);
+        if (idx >= 0 && idx <= numThemes) {
+            currentThemeIndex = idx;
+        }
+    }
+    function applyTheme(index) {
+        if (index < 0 || index > numThemes) return;
+        if (index === giantSquid) {
+            styleElement.textContent = '';
+        } else {
+            const themeName = themeKeys[index];
+            styleElement.textContent = themes[themeName];
+        }
+        localStorage.setItem('MYdefaultThemeIndex', index);
+        currentThemeIndex = index;
+    }
+    applyTheme(currentThemeIndex);
+    document.addEventListener('keydown', (e) => {
+        if (e.key.toLowerCase() === 't' && e.shiftKey && !e.ctrlKey && !e.altKey) {
+            const nextIndex = (currentThemeIndex + 1) % mymynewTheme;
+            applyTheme(nextIndex);
+            e.preventDefault();
+        } else if (e.key.toLowerCase() === 'y' && e.shiftKey && !e.ctrlKey && !e.altKey) {
+            applyTheme(giantSquid);
+            e.preventDefault();
+        }
+    });
+})();
+
+
+
+
+//gggg
+(function() {
+    'use strict';
+
+    function initColorCycle() {
+        if (!window.pixiApp || !window.pixiApp.renderer) {
+            console.log('Pix not ready—retrying in 1s');
+            setTimeout(initColorCycle, 1000);
+            return;
+        }
+
+        try {
+            const app = window.pixiApp;
+
+            const themeKeys = [
+                'Dark Blue', 'Cachalot', 'Whark Yellow', 'Cream',
+                'Bree Red', 'Teal', 'Very Dark Gray',
+                'Lime', 'Fancy Purple', 'Amber gs Orange', 'Grong Pink',
+                'Neon Blue', 'Hot Magenta', 'Gold Arapaima', 'Opalescent',
+                'Deep Navy', 'Olive', 'Blood', 'Indigo',
+                'Coral', 'Khaki', 'Plum', 'Salmon',
+                'Blush', 'Lamprey', 'Jellyfish', 'Deep coral'
+            ];
+            const themeColors = [
+                0x001122, 0x40445a, 0xffff66, 0xfffde7,
+                0x470000, 0x008080, 0x222222,
+                0x32cd32, 0x9932cc, 0xff4500, 0x682B4A,
+                0x006868, 0xff1493, 0x2A2400, 0xc0c0c0,
+                0x000080, 0x808000, 0x800000, 0x4b0082,
+                0x683521, 0xf0e68c, 0xdda0dd, 0xfa8072,
+                0xff6347, 0x401234, 0x623562, 0xf5deb3
+            ];
+
+            let colorCycleIndex = 0;
+            try {
+                const savedIndex = localStorage.getItem('bgColorIndex');
+                if (savedIndex !== null) {
+                    colorCycleIndex = parseInt(savedIndex, 10);
+                    colorCycleIndex = Math.max(0, Math.min(colorCycleIndex, themeColors.length - 1));
+                } else {
+                    console.log('default is Dark Blue.');
+                }
+            } catch (err) {
+                console.warn('unavailable—using default color:', err.message);
+            }
+            function applyBackground(index) {
+                try {
+                    const color = themeColors[index];
+                    window.pixiApp.renderer.backgroundColor = color;
+                    window.pixiApp.renderer.resize(window.pixiApp.renderer.width, window.pixiApp.renderer.height);
+                } catch (err) {
+                    console.error('error:', err);
+                }
+            }
+            applyBackground(colorCycleIndex);
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key.toLowerCase() === 'u' && e.shiftKey && !e.ctrlKey && !e.altKey) {
+                    colorCycleIndex = (colorCycleIndex + 1) % themeColors.length;
+                    applyBackground(colorCycleIndex);
+                    try {
+                        localStorage.setItem('bgColorIndex', colorCycleIndex);
+                    } catch (err) {
+                        console.warn('failed to save to storage,', err.message);
+                    }
+                    e.preventDefault();
+                }
+            });
+
+
+        } catch (err) {
+            console.error('Color failed:', err);
+        }
+    }
+
+    initColorCycle();
+
+})();
+
+
+
+
+// to add custom animal (replacing sinophore) Ctrl+F to find " IMGOVERHERE " and then follow the instructions
+
+(function() {
+    'use strict';
+
+    const PROBE_MODE = true;
+    const USE_PROXY = true;
+
+
+
+
+    const originalSrcSetter = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src').set;
+    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+        set: function(value) {
+            if (typeof value === 'string' &&
+                value.includes('beta.deeeep.io/assets/characters/') &&
+                value.includes('.png') &&
+                !value.toLowerCase().includes('giantsinophore.png')) {
+                let directUrl = value.replace('beta.deeeep.io', 'deeeep.io');
+                directUrl = USE_PROXY ? `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}` : directUrl;
+                if (PROBE_MODE) console.log(`Redirecting png: (excluding giantsinophore): ${value.split('?')[0].split('/').pop()} → direct`);
+                return originalSrcSetter.call(this, directUrl);
+            }
+            return originalSrcSetter.call(this, value);
+        },
+        configurable: true
+    });
+
+
+    const originalFetch = window.fetch;
+    window.fetch = function(...args) {
+        const url = args[0];
+        if (typeof url === 'string' &&
+            url.includes('beta.deeeep.io/assets/characters/') &&
+            url.includes('.png') &&
+            !url.toLowerCase().includes('giantsinophore.png')) {
+            let directUrl = USE_PROXY ? `https://api.allorigins.win/raw?url=${encodeURIComponent(url.replace('beta.deeeep.io', 'deeeep.io'))}` : url.replace('beta.deeeep.io', 'deeeep.io');
+            args[0] = directUrl;
+            if (PROBE_MODE) console.log(`Redirecting png: (excluding giantsinophore): ${url.split('?')[0].split('/').pop()}`);
+        }
+        return originalFetch.apply(this, args);
+    };
+
+    //IMGOVERHERE
+    //add any link here simply paste your url in this format: 'url.png',
+
+    //replace the entire list with your image link, adding multiple images to the list (as seen below) will cause the site to pick one at random on refresh
+    const GS_CUSTOM_IMAGE_URLS = [
+        'https://media.discordapp.net/attachments/360860221515759619/1267709035847876629/shrimp.png?ex=68db648b&is=68da130b&hm=d18c57996f8118ff28afe958ce82eadd629e5e250fa4b3380c430ace34ea3444&=&format=webp&quality=lossless&width=566&height=823',
+        'https://cdn.deeeep.io/custom/skins/20816-1.png',
+    ];
+    //url for sinophore https://deeeep.io/assets/characters/giantsinophore.png?v=32
+
+
+    function gs_getRandomCustomUrl() {
+        const baseUrl = GS_CUSTOM_IMAGE_URLS[Math.floor(Math.random() * GS_CUSTOM_IMAGE_URLS.length)];
+        const cacheBuster = `cb=${Date.now()}${Math.floor(Math.random() * 1000)}`;
+        if (baseUrl.includes('?')) {
+            return `${baseUrl}&${cacheBuster}`;
+        } else {
+            return `${baseUrl}?${cacheBuster}`;
+        }
+    }
+
+    const gs_originalSrcSetter = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src').set;
+    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+        set: function(value) {
+            if (typeof value === 'string' &&
+                value.toLowerCase().includes('giantsinophore.png')) {
+                let randomUrl = gs_getRandomCustomUrl();
+                if (USE_PROXY) {
+                    randomUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(randomUrl)}`;
+                }
+                if (PROBE_MODE) console.log(`🦈🦈Giantsinophore pngredirecting: ${value} → ${randomUrl}`);
+                return gs_originalSrcSetter.call(this, randomUrl);
+            }
+            return gs_originalSrcSetter.call(this, value);
+        },
+        configurable: true
+    });
+
+    const gs_originalFetch = window.fetch;
+    window.fetch = function(...args) {
+        const url = args[0];
+        if (typeof url === 'string' && url.toLowerCase().includes('giantsinophore.png')) {
+            let randomUrl = gs_getRandomCustomUrl();
+            if (USE_PROXY) {
+                randomUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(randomUrl)}`;
+            }
+            args[0] = randomUrl;
+            if (PROBE_MODE) console.log(`🦈 Giantsinophore pngredirecting ${url} → ${randomUrl}`);
+        }
+        return gs_originalFetch.apply(this, args);
+    };
+
+
+    function derivePIXI(app) {
+        if (app && app.stage) {
+            let proto = app.stage.__proto__;
+            while (proto && proto !== Object.prototype) {
+                if (proto.constructor && proto.constructor.Texture) {
+                    if (PROBE_MODE) console.log('✅ Derived PIXI from app.stage prototype.');
+                    return proto.constructor;
+                }
+                proto = proto.__proto__;
+            }
+        }
+        if (window.PIXI && window.PIXI.Texture) {
+            if (PROBE_MODE) console.log('✅ Derived PIXI from window.PIXI global.');
+            return window.PIXI;
+        }
+        if (PROBE_MODE) console.warn('⚠️ Could not derive PIXI from app or window.');
+        return null;
+    }
+
+
+    function createTextureFromUrl(PIXI, url) {
+        if (!PIXI) return null;
+        const proxiedUrl = USE_PROXY ? `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` : url;
+        return PIXI.Texture.from(proxiedUrl);
+    }
+
+
+    function waitForAppLayers(callback) {
+        let attempts = 0;
+        const maxAttempts = 30;
+        function check() {
+            attempts++;
+            const app = window.app;
+            if (app && app.stage && app.layers && app.layers.length > 0) {
+                callback(app);
+            } else if (attempts < maxAttempts) {
+                setTimeout(check, 500);
+            } else {
+                console.error('❌ Timeout waiting for app layers.');
+            }
+        }
+        check();
+    }
+
+    waitForAppLayers((app) => {
+        const PIXI = derivePIXI(app);
+        if (!PIXI) {
+            console.error('❌ Could not derive PIXI.');
+            return;
+        }
+
+        const animalsLayer = app.layers.find(l => l.layerId === 'animals');
+        if (!animalsLayer) {
+            console.error('❌ Animals layer not found.');
+            return;
+        }
+
+        if (PROBE_MODE) console.log('✅ Animals layer found, observing for giantsinophore placement.');
+
+
+        function normalizeUrl(url) {
+            return url ? url.split('?')[0].toLowerCase() : '';
+        }
+
+
+        function replaceTexture(sprite) {
+            const randomUrl = CUSTOM_IMAGE_URLS[Math.floor(Math.random() * CUSTOM_IMAGE_URLS.length)];
+            if (PROBE_MODE) console.log('🦈🦈🦈 Replacing giantsinophore texture with:', randomUrl);
+            const newTex = createTextureFromUrl(PIXI, randomUrl);
+            if (!newTex) {
+                console.warn('⚠️ Failed to create PIXI texture from custom URL.');
+                return;
+            }
+            if (newTex.baseTexture.valid) {
+                applyTexture(sprite, newTex);
+            } else {
+                newTex.baseTexture.once('loaded', () => applyTexture(sprite, newTex));
+                newTex.baseTexture.once('error', () => console.warn('⚠️ Failed to load custom texture:', randomUrl));
+            }
+        }
+
+        function applyTexture(sprite, texture) {
+            sprite.texture = texture;
+            sprite.anchor.set(0.5, 0.5);
+            sprite.scale.set(0.05, 0.05);
+            if (PROBE_MODE) console.log('✅ Texture replaced successfully.');
+        }
+
+
+        const observer = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (node && node.texture && node.texture.baseTexture && node.texture.baseTexture.imageUrl) {
+                        const normUrl = normalizeUrl(node.texture.baseTexture.imageUrl);
+                        if (normUrl.endsWith('giantsinophore.png')) {
+                            if (PROBE_MODE) console.log('🦈🦈v Giantsinophore sprite detected, replacing texture.');
+                            replaceTexture(node);
+                        }
+                    }
+                }
+            }
+        });
+
+        observer.observe(animalsLayer, { childList: true });
+    });
+
+    if (PROBE_MODE) console.log('🦈🦈 Giantsinophore random custom image replacer v3 loaded.');
+
+})();
