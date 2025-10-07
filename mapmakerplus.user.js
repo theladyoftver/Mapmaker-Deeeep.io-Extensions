@@ -609,66 +609,96 @@
         }
     }
 
-    function flipShapePointsHorizontal(shape) {
-        if (!shape || !shape.points || shape.points.length < 3) {
-            if (debugMode) console.log('flipShapePointsHorizontal: Invalid shape/points - skip');
+    function areShapesFlippable(shapes) {
+        let failureFlag = true;
+        if (shapes.length <= 0 || !shapes) {
+            failureFlag = false;
+        }
+        
+        shapes.forEach(shape => {
+            if (!shape.points || shape.points.length < 3) {
+                failureFlag = false;
+            }
+        })
+        return failureFlag;
+    }
+
+    function flipShapePointsHorizontal(shapes) {
+        if (!areShapesFlippable(shapes)) {
+            if (debugMode) console.log('flipShapePointsHorizontal: Invalid shapes/points - skip');
             return false;
         }
 
         let centerX = 0;
-        shape.points.forEach(p => {
-            centerX += p.x;
-        });
-        centerX /= shape.points.length;
-
-        shape.points.forEach(point => {
-            const dx = point.x - centerX;
-            point.x = centerX - dx;
-        });
-
-        if (typeof shape.redraw === 'function') {
-            shape.redraw();
-        }
+        let points = 0;
+        shapes.forEach(s => {
+            s.points.forEach(p => {
+                centerX += p.x;
+                points++;
+            })
+        })
+        centerX /= points;
+        
+        shapes.forEach(s => {
+            s.points.forEach(point => {
+                const dx = point.x - centerX;
+                point.x = centerX - dx;
+            });
+        })
+        
+        shapes.forEach(shape => {
+            if (typeof shape.redraw === 'function') {
+                shape.redraw();
+            }
+        })
 
         refreshCanvasBounds();
-        if (debugMode) console.log(`flipShapePointsHorizontal: Flipped ${shape.type || 'shape'} horizontally`);
+        if (debugMode) console.log(`flipShapePointsHorizontal: Flipped ${shapes.length} shapes (first type is ${shapes[0].type || 'shape'}) horizontally`);
         return true;
     }
 
 
-    function flipShapePointsVertical(shape) {
-        if (!shape || !shape.points || shape.points.length < 3) {
+    function flipShapePointsVertical(shapes) {
+        if (!areShapesFlippable(shapes)) {
             if (debugMode) console.log('flipShapePointsVertical: Invalid shape/points - skip');
             return false;
         }
 
         let centerY = 0;
-        shape.points.forEach(p => {
-            centerY += p.y;
-        });
-        centerY /= shape.points.length;
+        let points = 0;
+        shapes.forEach(s => {
+            s.points.forEach(p => {
+                centerY += p.y;
+                points++;
+            })
+        })
+        centerY /= points;
 
-        shape.points.forEach(point => {
-            const dy = point.y - centerY;
-            point.y = centerY - dy;
-        });
+        shapes.forEach(s => {
+            s.points.forEach(point => {
+                const dy = point.y - centerY;
+                point.y = centerY - dy;
+            });
+        })
 
-        if (typeof shape.redraw === 'function') {
-            shape.redraw();
-        }
+        shapes.forEach(shape => {
+            if (typeof shape.redraw === 'function') {
+                shape.redraw();
+            }
+        })
 
         refreshCanvasBounds();
-        if (debugMode) console.log(`flipShapePointsVertical: Flipped ${shape.type || 'shape'} vertically`);
+        if (debugMode) console.log(`flipShapePointsVertical: Flipped ${shapes.length} shapes (first type is ${shapes[0].type || 'shape'}) vertically`);
         return true;
     }
     function applyFlipHorizontal() {
         try {
-            const shape = getSelectedShape();
-            if (!shape) {
+            const shapes = getSelectedShapes();
+            if (!shapes) {
                 if (debugMode) console.log('applyFlipHorizontal: No shape selected');
                 return;
             }
-            const success = flipShapePointsHorizontal(shape);
+            const success = flipShapePointsHorizontal(shapes);
             if (success && window.pixiApp?.renderer?.render) {
                 window.pixiApp.renderer.render(window.pixiApp.stage);
             }
@@ -679,12 +709,12 @@
 
     function applyFlipVertical() {
         try {
-            const shape = getSelectedShape();
-            if (!shape) {
+            const shapes = getSelectedShapes();
+            if (!shapes) {
                 if (debugMode) console.log('applyFlipVertical: No shape selected');
                 return;
             }
-            const success = flipShapePointsVertical(shape);
+            const success = flipShapePointsVertical(shapes);
             if (success && window.pixiApp?.renderer?.render) {
                 window.pixiApp.renderer.render(window.pixiApp.stage);
             }
