@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Mapmaker Pro ++
+// @name         Mapmaker+
 // @namespace    http://tampermonkey.net/
 // @version      777
 // @description  https://docs.google.com/document/d/1Ed99ys5a9vWfS6ETQkSvslfGe0pUIgRPwDESnfl_MgU/edit?usp=sharing
-// @author       breeeee (big shout out to ai for correcting some errors :))
+// @author       breeeee (big shout out to ai for correcting some errors :)) + credits to humoresque for multi flipping support
 // @match        https://mapmaker.deeeep.io/*
 // @match        https://mapmaker.deeeep.io/map/*
 // @icon         https://cdn.deeeep.io/custom/skins/27647-1-c90f65f2-4fb1-41d4-b755-b9c509568289.png
@@ -25,7 +25,6 @@
     const debugMode = true;
     let keyHandler = null;
     let flipMode = false;
-    let horizontalMode = false;
     let retryCount = 0;
     const MAX_RETRIES = 3;
     let forceIndividualMode = false;
@@ -97,18 +96,6 @@
                     if (debugMode) console.log(`Bake: Added size to ${obj.type} ID ${id}: ${obj.size.toFixed(2)}x`);
                     bakedCount++;
                 }
-                if (changes.settings && changes.settings.collidable !== undefined && obj.settings) {
-                    if (!obj.settings) obj.settings = {};
-                    obj.settings.collidable = changes.settings.collidable;
-                    if (debugMode) console.log(`Bake: Added collidable=${changes.settings.collidable} to ${obj.type} ID ${id} settings`);
-                    bakedCount++;
-                }
-                if (changes.hSType !== undefined && obj.type === 'H') {
-                    obj.hSType = changes.hSType;
-                    if (debugMode) console.log(`Bake: Added hSType=${changes.hSType} to H ID ${id}`);
-                    bakedCount++;
-                }
-
                 if (changes.position !== undefined) {
                     obj.x = changes.position.x;
                     obj.y = changes.position.y;
@@ -614,7 +601,7 @@
         if (shapes.length <= 0 || !shapes) {
             failureFlag = false;
         }
-        
+
         shapes.forEach(shape => {
             if (!shape.points || shape.points.length < 3) {
                 failureFlag = false;
@@ -638,14 +625,14 @@
             })
         })
         centerX /= points;
-        
+
         shapes.forEach(s => {
             s.points.forEach(point => {
                 const dx = point.x - centerX;
                 point.x = centerX - dx;
             });
         })
-        
+
         shapes.forEach(shape => {
             if (typeof shape.redraw === 'function') {
                 shape.redraw();
@@ -872,30 +859,6 @@
     }
 
 
-    function toggleHorizontalGradient() {
-        try {
-            if (!isObjectSelected()) return;
-            const shape = getSelectedShape();
-            if (!shape.colors || shape.colors.length < 2) return;
-
-            horizontalMode = !horizontalMode;
-
-            if (horizontalMode) {
-                rotateShapePoints(shape, 90);
-            } else if (shape._originalPoints) {
-                shape.points = [...shape._originalPoints];
-            }
-
-            if (typeof shape.redraw === 'function') shape.redraw();
-            refreshCanvasBounds();
-            if (debugMode) console.log(`toggleHorizontalGradient: Now ${horizontalMode ? 'horizontal' : 'normal'}`);
-        } catch (e) {
-            console.error('toggleHorizontalGradient error:', e);
-            horizontalMode = !horizontalMode;
-        }
-    }
-
-
     function refreshCanvasBounds() {
         try {
             if (!window.app || !window.app.viewport) return;
@@ -944,18 +907,6 @@
                 snappingEnabled = !snappingEnabled;
                 console.log(`Snapping: ${snappingEnabled ? 'ON' : 'OFF'}`);
                 prevent = true;
-            }
-
-            if (key === 'l' && event.shiftKey) {
-                const shape = getSelectedShape();
-                if (shape && shape.type === 'H') {
-                    const newHSType = prompt(`Current hSType: ${shape.hSType || 28}\nEnter new hSType (number):`, shape.hSType || 28);
-                    if (newHSType !== null && !isNaN(newHSType)) {
-                        changeHSType(shape, parseInt(newHSType));
-                    }
-                    prevent = true;
-                    return;
-                }
             }
 
             if (key === 'i' && event.shiftKey) {
@@ -1008,15 +959,6 @@
                 }
             }
 
-
-            if (key === 'b' && event.shiftKey) {
-                const shape = getSelectedShape();
-                if (shape) {
-                    toggleCollidable(shape);
-                    prevent = true;
-                }
-            }
-
             if ((key === '{' || key === '}') && event.shiftKey) {
                 const shape = getSelectedShape();
                 if (shape) {
@@ -1055,10 +997,7 @@
                 prevent = true;
             }
 
-            if (key === 'w' && event.shiftKey) {
-                toggleHorizontalGradient();
-                prevent = true;
-            }
+
 
             if (key === 'q' || key === 'e') {
                 const isQ = key === 'q';
@@ -1124,8 +1063,8 @@
 
             const oldScaleX = shape.scale.x;
             const oldScaleY = shape.scale.y;
-            const newScaleX = Math.max(0.1, Math.min(5.0, oldScaleX + deltaScale));
-            const newScaleY = Math.max(0.1, Math.min(5.0, oldScaleY + deltaScale));
+            const newScaleX = Math.max(0.1, Math.min(10.0, oldScaleX + deltaScale));
+            const newScaleY = Math.max(0.1, Math.min(10.0, oldScaleY + deltaScale));
 
             shape.scale.x = newScaleX;
             shape.scale.y = newScaleY;
@@ -1212,62 +1151,7 @@
         }
     }
 
-    function changeHSType(shape, newHSType) {
-        try {
-            if (!shape || shape.type !== 'H') return false;
-            if (!shape.settings) shape.settings = {};
-            shape.hSType = newHSType;
-            shape.settings.id = newHSType;
-            storeBakedChange(shape.id, 'hSType', newHSType);
 
-            if (window.app && window.app.screenObjects) {
-                const soObj = window.app.screenObjects[shape.id.toString()];
-                if (soObj) soObj.hSType = newHSType;
-            }
-
-            if (typeof shape.redraw === 'function') {
-                shape.redraw();
-                setTimeout(() => shape.redraw(), 50);
-            }
-            refreshCanvasBounds();
-            window.app.worldDirty = true;
-            if (debugMode) console.log(`changeHSType: Set to ${newHSType}`);
-            return true;
-        } catch (e) {
-            console.error('changeHSType error:', e);
-            return false;
-        }
-    }
-
-    function toggleCollidable(shape) {
-        try {
-            if (!shape || !shape.points || !shape.settings) return false;
-            if (!shape.settings) shape.settings = {};
-            const newCollidable = !shape.settings.collidable;
-            shape.settings.collidable = newCollidable;
-            storeBakedChange(shape.id, 'settings', {collidable: newCollidable});
-
-            if (window.app && window.app.screenObjects) {
-                const soObj = window.app.screenObjects[shape.id.toString()];
-                if (soObj) {
-                    if (!soObj.settings) soObj.settings = {};
-                    soObj.settings.collidable = newCollidable;
-                }
-            }
-
-            window.app.worldDirty = true;
-            if (typeof shape.redraw === 'function') {
-                shape.redraw();
-                setTimeout(() => shape.redraw(), 50);
-            }
-            refreshCanvasBounds();
-            if (debugMode) console.log(`toggleCollidable: Set to ${newCollidable}`);
-            return true;
-        } catch (e) {
-            console.error('toggleCollidable error:', e);
-            return false;
-        }
-    }
 
     function probeGradient(shape, beforeSet = false) {
         if (!debugMode) return;
@@ -1315,12 +1199,11 @@
 
             console.log('%c🎨 Mapmaker+ v777+ Fixed Loaded! 🚀');
             console.log('• Arrows:movement');
-            console.log('• R/Q: Rotate 15° (Shift 90°)');
+            console.log('• E/Q: Rotate 15° (Shift 90°)');
             console.log('• 9/0: Eyedropper (top/bottom)');
             console.log('• F: Toggle gradient flip');
-            console.log('• E: Toggle horizontal (90° rotation)');
-            console.log('• +/-: Resize prop (0.1x steps)');
-            console.log('• [ / ]: Transparency (0.1 steps)');
+            console.log('• +/-: Resize prop  ');
+            console.log('• [ / ]: Transparency');
             console.log('• Z/C: Z-Index (+/-10)');
 
             console.log('initFeatures: Complete - Features active');
@@ -1415,24 +1298,6 @@
             restored = true;
         }
 
-        if (soObj.settings && soObj.settings.collidable !== undefined && shape.settings) {
-            shape.settings.collidable = soObj.settings.collidable;
-            if (typeof shape.redraw === 'function') {
-                shape.redraw();
-                setTimeout(() => shape.redraw(), 50);
-            }
-            restored = true;
-        }
-
-        if (soObj.hSType !== undefined && shape.type === 'H') {
-            shape.hSType = soObj.hSType;
-            if (typeof shape.redraw === 'function') {
-                shape.redraw();
-                setTimeout(() => shape.redraw(), 50);
-            }
-            restored = true;
-        }
-
         if (restored && debugMode) console.log(`restoreProps: Applied to ID ${shape.id} (${shape.type})`);
         return restored;
     }
@@ -1479,7 +1344,7 @@
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => {
-            setTimeout(initFeatures, 1000); 
+            setTimeout(initFeatures, 1000);
         });
     } else {
         setTimeout(initFeatures, 1000);
@@ -4534,8 +4399,7 @@ Specificity: (1,4,0)
 
     //replace the entire list with your image link, adding multiple images to the list (as seen below) will cause the site to pick one at random on refresh
     const GS_CUSTOM_IMAGE_URLS = [
-        'https://media.discordapp.net/attachments/360860221515759619/1267709035847876629/shrimp.png?ex=68db648b&is=68da130b&hm=d18c57996f8118ff28afe958ce82eadd629e5e250fa4b3380c430ace34ea3444&=&format=webp&quality=lossless&width=566&height=823',
-        'https://cdn.deeeep.io/custom/skins/20816-1.png',
+        'https://deeeep.io/assets/characters/giantsinophore.png?v=32',
     ];
     //url for sinophore https://deeeep.io/assets/characters/giantsinophore.png?v=32
 
