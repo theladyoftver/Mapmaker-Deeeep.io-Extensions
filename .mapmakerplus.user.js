@@ -1389,186 +1389,7 @@ document.head.appendChild(link);
     // Themes, you may customize as you wish :)
     const themes = {
 
-
-        raspberry: `
-            body, html {
-                background-color: #F8E1E9 !important;
-                color: #C2185B !important;
-                font-family: Arial, sans-serif !important;
-            }
-            .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
-            .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
-            .left-sidebar, .tools, .m-section, .list {
-                background-color: rgba(248, 225, 233, 0.9) !important;
-                border: 1px solid #F06292 !important;
-                color: #C2185B !important;
-                box-shadow: 0 2px 8px rgba(240, 98, 146, 0.2) !important;
-            }
-            button, .button, input[type="button"], .btn, [class*="button"],
-            .icon-button {
-                background-color: #F8BBD9 !important;
-                border: 0px solid #F06292 !important;
-                color: #C2185B !important;
-                border-radius: 4px !important;
-                padding: 3px 14px !important;
-                cursor: pointer !important;
-            }
-            div.name {
-                color: #C2185B !important;
-            }
-            .main-menu, .map-info, .map-creator, .name {
-                color: #880E4F !important;
-            }
-            .main-menu .menu .menu-item {
-                padding: 0 15px;
-                font-size: 1em;
-                color: #880E4F;
-                cursor: default;
-                height: 22px;
-                line-height: 22px;
-            }
-            .main-menu .map-info .map-name .id {
-                font-size: .8em;
-                color: #880E4F;
-                margin-right: 3px;
-            }
-            .col-6 {
-                width: 50%;
-            }
-            button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
-                background-color: #F06292 !important;
-                transform: translateY(-1px) !important;
-                box-shadow: 0 2px 4px rgba(240, 98, 146, 0.3) !important;
-            }
-            button:active, .button:active, .btn:active, .icon-button:active {
-                background-color: #AD1457 !important;
-                transform: translateY(0) !important;
-            }
-            .btn.icon-button.on {
-                background-color: #F06292 !important;
-                box-shadow: inset 0 2px 4px rgba(240, 98, 146, 0.2) !important;
-            }
-            .btn.icon-button, .btn.icon-button.on {
-                padding: 4px !important;
-                width: 24px !important;
-                height: 24px !important;
-                min-width: unset !important;
-                font-size: 16px !important;
-                color: #C2185B !important;
-                line-height: 1 !important;
-                display: inline-flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                transform: scale(0.9) !important;
-            }
-            .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
-                font-size: 16px !important;
-                width: 16px !important;
-                height: 16px !important;
-            }
-            .btn.icon-button:hover {
-                transform: scale(1.0) !important;
-            }
-            input, select, textarea, input.inline {
-                background-color: #F8E1E9 !important;
-                border: 1px solid #F06292 !important;
-                color: #C2185B !important;
-                border-radius: 4px !important;
-                padding: 6px !important;
-            }
-            input:focus, select:focus, textarea:focus, input.inline:focus {
-                outline: 2px solid #F8BBD9 !important;
-                border-color: #F8BBD9 !important;
-            }
-            .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
-                background-color: #F8BBD9 !important;
-                border-bottom: 1px solid #F06292 !important;
-                color: #C2185B !important;
-            }
-            .world-settings .setting .key[data-v-815b0b66] {
-                color: #5D1B3A;
-                text-align: left;
-            }
-            .world-settings .content[data-v-815b0b66] {
-                font-size: .8em;
-                color: #C2185B;
-            }
-            .layers .list .layer .meta .name[data-v-f9c33b4a] {
-                font-size: .88em;
-            }
-            .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
-                --tw-text-opacity: 1;
-                color: rgb(255 255 255);
-                background-color: #AD1457;
-                padding: 4px 11px 1px;
-                font-size: .9em;
-                border-radius: 0 2px 0 0;
-            }
-            .layer-item, .selected-item, ul[class*="list"], li,
-            .tool, .has-tooltip {
-                background-color: rgba(248, 225, 233, 0.7) !important;
-                border: 1px solid #F06292 !important;
-                color: #C2185B !important;
-                border-radius: 4px !important;
-            }
-            .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
-                background-color: #F8BBD9 !important;
-                transform: scale(1.05) !important;
-            }
-            .tool.active {
-                background-color: #F06292 !important;
-                border-color: #AD1457 !important;
-                box-shadow: 0 0 0 2px rgba(240, 98, 146, 0.4) !important;
-            }
-            i.material-icon, .material-icon {
-                color: #C2185B !important;
-                fill: #C2185B !important;
-                background-color: transparent !important;
-            }
-            .tool:hover i.material-icon {
-                color: #F8BBD9 !important;
-            }
-            .canvas-container, #gameCanvas, canvas {
-                background-color: transparent !important;
-            }
-            .canvas-overlay, .selection-box, .grid {
-                border-color: #F8BBD9 !important;
-                background-color: rgba(248, 187, 217, 0.2) !important;
-            }
-            ::-webkit-scrollbar {
-                width: 8px !important;
-            }
-            ::-webkit-scrollbar-track {
-                background: #F8E1E9 !important;
-            }
-            ::-webkit-scrollbar-thumb {
-                background: #F8BBD9 !important;
-                border-radius: 4px !important;
-            }
-            ::-webkit-scrollbar-thumb:hover {
-                background: #F06292 !important;
-            }
-            [class*="dark"], .dark-theme, body.dark {
-                background-color: #F8E1E9 !important;
-                filter: hue-rotate(0deg) brightness(1) !important;
-            }
-            #layers-panel, #tools-panel, .property-panel,
-            .reaction-panel {
-                background: linear-gradient(to bottom, #F8E1E9, #F8BBD9) !important;
-            }
-            .save-button, .load-button, .export-button {
-                background: #F8BBD9 !important;
-                color: #C2185B !important;
-            }
-            .children-inline {
-                background-color: rgba(248, 225, 233, 0.5) !important;
-            }
-            * {
-                transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
-            }
-        `,
-
-        cachalot: `
+cachalot: `
             body, html {
                 background-color: #40445a !important;
                 color: #d1d4db !important;
@@ -1741,6 +1562,183 @@ document.head.appendChild(link);
             }
             .children-inline {
                 background-color: rgba(64, 68, 90, 0.5) !important;
+            }
+            * {
+                transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+            }
+        `,
+        raspberry: `
+            body, html {
+                background-color: #F8E1E9 !important;
+                color: #C2185B !important;
+                font-family: Arial, sans-serif !important;
+            }
+            .panel, .ui-panel, .toolbar, .sidebar, .layers-panel, .tools-panel,
+            .mapmaker-container, div[class*="panel"], div[class*="toolbar"],
+            .left-sidebar, .tools, .m-section, .list {
+                background-color: rgba(248, 225, 233, 0.9) !important;
+                border: 1px solid #F06292 !important;
+                color: #C2185B !important;
+                box-shadow: 0 2px 8px rgba(240, 98, 146, 0.2) !important;
+            }
+            button, .button, input[type="button"], .btn, [class*="button"],
+            .icon-button {
+                background-color: #F8BBD9 !important;
+                border: 0px solid #F06292 !important;
+                color: #C2185B !important;
+                border-radius: 4px !important;
+                padding: 3px 14px !important;
+                cursor: pointer !important;
+            }
+            div.name {
+                color: #C2185B !important;
+            }
+            .main-menu, .map-info, .map-creator, .name {
+                color: #880E4F !important;
+            }
+            .main-menu .menu .menu-item {
+                padding: 0 15px;
+                font-size: 1em;
+                color: #880E4F;
+                cursor: default;
+                height: 22px;
+                line-height: 22px;
+            }
+            .main-menu .map-info .map-name .id {
+                font-size: .8em;
+                color: #880E4F;
+                margin-right: 3px;
+            }
+            .col-6 {
+                width: 50%;
+            }
+            button:hover, .button:hover, input[type="button"]:hover, .btn:hover, .icon-button:hover {
+                background-color: #F06292 !important;
+                transform: translateY(-1px) !important;
+                box-shadow: 0 2px 4px rgba(240, 98, 146, 0.3) !important;
+            }
+            button:active, .button:active, .btn:active, .icon-button:active {
+                background-color: #AD1457 !important;
+                transform: translateY(0) !important;
+            }
+            .btn.icon-button.on {
+                background-color: #F06292 !important;
+                box-shadow: inset 0 2px 4px rgba(240, 98, 146, 0.2) !important;
+            }
+            .btn.icon-button, .btn.icon-button.on {
+                padding: 4px !important;
+                width: 24px !important;
+                height: 24px !important;
+                min-width: unset !important;
+                font-size: 16px !important;
+                color: #C2185B !important;
+                line-height: 1 !important;
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                transform: scale(0.9) !important;
+            }
+            .btn.icon-button i.material-icon, .btn.icon-button.on i.material-icon {
+                font-size: 16px !important;
+                width: 16px !important;
+                height: 16px !important;
+            }
+            .btn.icon-button:hover {
+                transform: scale(1.0) !important;
+            }
+            input, select, textarea, input.inline {
+                background-color: #F8E1E9 !important;
+                border: 1px solid #F06292 !important;
+                color: #C2185B !important;
+                border-radius: 4px !important;
+                padding: 6px !important;
+            }
+            input:focus, select:focus, textarea:focus, input.inline:focus {
+                outline: 2px solid #F8BBD9 !important;
+                border-color: #F8BBD9 !important;
+            }
+            .toolbar-top, .toolbar-bottom, .menu-bar, nav, header, footer {
+                background-color: #F8BBD9 !important;
+                border-bottom: 1px solid #F06292 !important;
+                color: #C2185B !important;
+            }
+            .world-settings .setting .key[data-v-815b0b66] {
+                color: #5D1B3A;
+                text-align: left;
+            }
+            .world-settings .content[data-v-815b0b66] {
+                font-size: .8em;
+                color: #C2185B;
+            }
+            .layers .list .layer .meta .name[data-v-f9c33b4a] {
+                font-size: .88em;
+            }
+            .right-sidebar .m-section[data-v-17e9738e] .title-bar .title {
+                --tw-text-opacity: 1;
+                color: rgb(255 255 255);
+                background-color: #AD1457;
+                padding: 4px 11px 1px;
+                font-size: .9em;
+                border-radius: 0 2px 0 0;
+            }
+            .layer-item, .selected-item, ul[class*="list"], li,
+            .tool, .has-tooltip {
+                background-color: rgba(248, 225, 233, 0.7) !important;
+                border: 1px solid #F06292 !important;
+                color: #C2185B !important;
+                border-radius: 4px !important;
+            }
+            .layer-item:hover, .selected-item:hover, .tool:hover, .has-tooltip:hover {
+                background-color: #F8BBD9 !important;
+                transform: scale(1.05) !important;
+            }
+            .tool.active {
+                background-color: #F06292 !important;
+                border-color: #AD1457 !important;
+                box-shadow: 0 0 0 2px rgba(240, 98, 146, 0.4) !important;
+            }
+            i.material-icon, .material-icon {
+                color: #C2185B !important;
+                fill: #C2185B !important;
+                background-color: transparent !important;
+            }
+            .tool:hover i.material-icon {
+                color: #F8BBD9 !important;
+            }
+            .canvas-container, #gameCanvas, canvas {
+                background-color: transparent !important;
+            }
+            .canvas-overlay, .selection-box, .grid {
+                border-color: #F8BBD9 !important;
+                background-color: rgba(248, 187, 217, 0.2) !important;
+            }
+            ::-webkit-scrollbar {
+                width: 8px !important;
+            }
+            ::-webkit-scrollbar-track {
+                background: #F8E1E9 !important;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #F8BBD9 !important;
+                border-radius: 4px !important;
+            }
+            ::-webkit-scrollbar-thumb:hover {
+                background: #F06292 !important;
+            }
+            [class*="dark"], .dark-theme, body.dark {
+                background-color: #F8E1E9 !important;
+                filter: hue-rotate(0deg) brightness(1) !important;
+            }
+            #layers-panel, #tools-panel, .property-panel,
+            .reaction-panel {
+                background: linear-gradient(to bottom, #F8E1E9, #F8BBD9) !important;
+            }
+            .save-button, .load-button, .export-button {
+                background: #F8BBD9 !important;
+                color: #C2185B !important;
+            }
+            .children-inline {
+                background-color: rgba(248, 225, 233, 0.5) !important;
             }
             * {
                 transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
