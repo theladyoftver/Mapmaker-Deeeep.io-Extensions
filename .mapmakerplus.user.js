@@ -610,21 +610,26 @@
         return failureFlag;
     }
 
-    function flipShapePointsHorizontal(shapes) {
+    function flipShapePointsHorizontal(shapes, aboutWorldCenter) {
         if (!areShapesFlippable(shapes)) {
             if (debugMode) console.log('flipShapePointsHorizontal: Invalid shapes/points - skip');
             return false;
         }
 
         let centerX = 0;
-        let points = 0;
-        shapes.forEach(s => {
-            s.points.forEach(p => {
-                centerX += p.x;
-                points++;
+        if (aboutWorldCenter) {
+            centerX = window.app.layers[0].width / 2;
+        }
+        else {
+            let points = 0;
+            shapes.forEach(s => {
+                s.points.forEach(p => {
+                    centerX += p.x;
+                    points++;
+                })
             })
-        })
-        centerX /= points;
+            centerX /= points;
+        }
 
         shapes.forEach(s => {
             s.points.forEach(point => {
@@ -678,14 +683,14 @@
         if (debugMode) console.log(`flipShapePointsVertical: Flipped ${shapes.length} shapes (first type is ${shapes[0].type || 'shape'}) vertically`);
         return true;
     }
-    function applyFlipHorizontal() {
+    function applyFlipHorizontal(aboutWorldCenter) {
         try {
             const shapes = getSelectedShapes();
             if (!shapes) {
                 if (debugMode) console.log('applyFlipHorizontal: No shape selected');
                 return;
             }
-            const success = flipShapePointsHorizontal(shapes);
+            const success = flipShapePointsHorizontal(shapes, aboutWorldCenter);
             if (success && window.pixiApp?.renderer?.render) {
                 window.pixiApp.renderer.render(window.pixiApp.stage);
             }
@@ -1007,7 +1012,7 @@
             }
 
             if (key === 'a' && event.shiftKey) {
-                applyFlipHorizontal();
+                applyFlipHorizontal(event.ctrlKey);
                 prevent = true;
             }
 
