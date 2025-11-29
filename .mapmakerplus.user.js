@@ -715,6 +715,65 @@
         }
     }
 
+    function scaleShapesWrapper(enlarge) {
+        try {
+            const shapes = getSelectedShapes();
+            if (!shapes) {
+                if (debugMode) console.log('applyFlipVertical: No shape selected');
+                return;
+            }
+            const success = scaleShapes(shapes, enlarge);
+            if (success && window.pixiApp?.renderer?.render) {
+                window.pixiApp.renderer.render(window.pixiApp.stage);
+            }
+        } catch (e) {
+            console.errpr('scaling shape error:', e);
+        }
+    }
+
+    function scaleShapes(shapes, enlarge) {
+        if (!areShapesFlippable(shapes)) {
+            if (debugMode) console.log('scaleShapes: Invalid shape/points - skip');
+            return false;
+        }
+
+        let centerX = 0;
+        let centerY = 0;
+        let points = 0;
+        shapes.forEach(s => {
+            s.points.forEach(p => {
+                centerX += p.x;
+                centerY += p.y;
+                points++;
+            })
+        })
+        centerY /= points;
+        centerX /= points;
+
+        let factor = 0.9;
+        if (enlarge) {
+            factor = 1.1;
+        }
+        shapes.forEach(s => {
+            s.points.forEach(point => {
+                const dx = point.x - centerX;
+                const dy = point.y - centerY;
+                point.x = centerX + factor * dx;
+                point.y = centerY + factor * dy;
+            });
+        })
+
+        shapes.forEach(shape => {
+            if (typeof shape.redraw === 'function') {
+                shape.redraw();
+            }
+        })
+
+        refreshCanvasBounds();
+        if (debugMode) console.log(`scaleShapes: Scaled ${shapes.length} shapes (first type is ${shapes[0].type || 'shape'})`);
+        return true;
+    }
+
     function rotateShapePoints(shape, angleDegrees) {
         if (!shape || !shape.points || shape.points.length < 3) {
             if (debugMode) console.log('rotateShapePoints: Invalid shape/points - skip');
@@ -1019,6 +1078,11 @@
 
             if (key === 'd' && event.shiftKey) {
                 applyFlipVertical();
+                prevent = true;
+            }
+
+            if (key === 's' && event.shiftKey) {
+                scaleShapesWrapper(event.altKey);
                 prevent = true;
             }
 
