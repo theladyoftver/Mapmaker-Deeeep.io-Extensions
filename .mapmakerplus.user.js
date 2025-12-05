@@ -2,8 +2,8 @@
 // @name         Mapmaker+
 // @namespace    http://tampermonkey.net/
 // @version      777
-// @description  https://docs.google.com/document/d/1Ed99ys5a9vWfS6ETQkSvslfGe0pUIgRPwDESnfl_MgU/edit?usp=sharing
-// @author       breeeee (big shout out to ai for correcting some errors :)) + credits to humoresque for multi flipping support
+// @description  https://docs.google.com/document/d/1teQOaOGpb6Ec_6nY4sJqy_UYu0GpvIiplKtgk-HL2aY/edit?usp=sharing
+// @author       Made by: bree(mymymy) + humoresque
 // @match        https://mapmaker.deeeep.io/*
 // @match        https://mapmaker.deeeep.io/map/*
 // @icon         https://cdn.deeeep.io/custom/skins/27647-1-c90f65f2-4fb1-41d4-b755-b9c509568289.png
