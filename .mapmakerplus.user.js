@@ -598,7 +598,7 @@
 
     function areShapesFlippable(shapes) {
         let failureFlag = true;
-        if (shapes.length <= 0 || !shapes) {
+        if (!shapes||shapes.length <= 0) {
             failureFlag = false;
         }
 
@@ -639,16 +639,17 @@
         })
 
         shapes.forEach(shape => {
-            if (typeof shape.redraw === 'function') {
-                shape.redraw();
-            }
+            if (typeof shape.updatePoints === "function") {shape.updatePoints();
+    } else if (typeof shape.redraw === "function") {
+        shape.redraw();
+    }
+            //test
         })
 
         refreshCanvasBounds();
         if (debugMode) console.log(`flipShapePointsHorizontal: Flipped ${shapes.length} shapes (first type is ${shapes[0].type || 'shape'}) horizontally`);
         return true;
     }
-
 
     function flipShapePointsVertical(shapes) {
         if (!areShapesFlippable(shapes)) {
