@@ -1,3 +1,4 @@
+ 
 // ==UserScript==
 // @name         Mapmaker+
 // @namespace    http://tampermonkey.net/
@@ -107,65 +108,6 @@
         if (debugMode) console.log(`Bake: Modified ${bakedCount} of ${screenObjects.length} screenObjects`);
         return screenObjects;
     }
-
-    if (debugMode) console.log('Bake: Hooks ready (enhanced with position baking)');
-
-    let originalFetch = window.fetch;
-    window.fetch = async function(url, options = {}) {
-        const urlStr = url.toString();
-        if (debugMode) console.log('NET DEBUG: Fetch to', urlStr, '- Method:', options?.method || 'GET');
-        const isMapSave = urlStr.includes('/maps/') && (options?.method === 'PUT' || options?.method === 'POST' || options?.method === 'PATCH');
-        if (isMapSave && options?.body) {
-            console.log('Bake: PUT/POST to /maps intercepted!', {url: urlStr, method: options.method});
-            try {
-                let bodyObj = options.body;
-                let wasString = false;
-                if (typeof bodyObj === 'string') {
-                    wasString = true;
-                    bodyObj = JSON.parse(bodyObj);
-                    console.log('Bake: Parsed string to object');
-                } else if (bodyObj && typeof bodyObj === 'object') {
-                    console.log('Bake: Direct object body - Keys:', Object.keys(bodyObj).slice(0, 5));
-                } else {
-                    console.log('Bake: Unexpected body type:', typeof bodyObj);
-                    return originalFetch.apply(this, arguments);
-                }
-
-                let modified = false;
-                if (bodyObj?.data && typeof bodyObj.data === 'string') {
-                    let mapData;
-                    try {
-                        mapData = JSON.parse(bodyObj.data);
-                        if (mapData?.screenObjects) {
-                            console.log('Bake: screenObjects found (length:', mapData.screenObjects.length, ')- Applying');
-                            bakeIntoScreenObjects(mapData.screenObjects);
-                            bodyObj.data = JSON.stringify(mapData);
-                            modified = true;
-                            console.log('Bake: Inner data injected');
-                        } else {
-                            console.log('Bake: No screenObjects - Data snippet:', bodyObj.data.substring(0, 200));
-                        }
-                    } catch (parseErr) {
-                        console.error('Bake: Parse data error:', parseErr);
-                    }
-                } else {
-                    console.log('Bake: No "data" field or not string - Skipping');
-                }
-
-                if (wasString && modified) {
-                    options.body = JSON.stringify(bodyObj);
-                    console.log('Bake: Full body re-stringified for fetch');
-                } else {
-                    options.body = bodyObj;
-                }
-                bakedChanges = {};
-                console.log('Bake: Forwarding modified body');
-            } catch (e) {
-                console.error('Bake fetch error:', e);
-            }
-        }
-        return originalFetch.apply(this, arguments);
-    };
 
     console.log('Full script: Fetch hook ready');
 
@@ -417,9 +359,13 @@
                 if (debugMode) console.log(`nudgeSelectedPoints: Moved selected point #${idx + 1} (main index ${mainIndex}) to (${point.x.toFixed(1)}, ${point.y.toFixed(1)})`);
             });
 
-            if (updatedCount > 0 && needsRedraw && typeof shape.redraw === 'function') {
-                shape.redraw();
-                console.log(`nudgeSelectedPoints: SUCCESS - Updated ${updatedCount} points (${snappedCount} snapped) on ${shape.type} ID ${shape.id} `);
+            if (updatedCount > 0 && needsRedraw)  {
+                if (typeof shape.updatePoints === "function") {
+                    shape.updatePoints();
+                } else if (typeof shape.redraw === "function") {
+                    shape.redraw();
+                }
+                
                 return true;
             } else {
                 console.warn('nudgeSelectedPoints: No points updated');
@@ -458,7 +404,7 @@
     function nudgeSelectedPoint(shape, deltaX, deltaY) {
         return nudgeSelectedPoints(shape, deltaX, deltaY);
     }
-
+ 
     function nudgeWholeShape(shape, deltaX, deltaY) {
         try {
             const pos = getPosition(shape);
@@ -471,9 +417,10 @@
                 shape.position.x = newX;
                 shape.position.y = newY;
             }
-            if (typeof shape.redraw === 'function') {
-                shape.redraw();
-            }
+            if (typeof shape.updatePoints === "function") {
+            shape.updatePoints();
+        } else if (typeof shape.redraw === "function") {
+            shape.redraw();}
             if (debugMode) console.log(`nudgeWholeShape: SUCCESS - Position to (${newX.toFixed(1)}, ${newY.toFixed(1)}) for ${shape.type} ID ${shape.id}`);
             return true;
         } catch (e) {
@@ -558,8 +505,9 @@
                             updatedCount++;
                             needsRedraw = true;
                         });
-                        if (updatedCount > 0 && needsRedraw && typeof shape.redraw === 'function') {
-                            shape.redraw();
+                        if (updatedCount > 0 && needsRedraw) {
+                            if (typeof shape.updatePoints === "function") {
+                                shape.updatePoints();} else if (typeof shape.redraw === "function") {shape.redraw();}
                             success = true;
                             if (debugMode) console.log(`applyNudge: Whole mode - Nudged all ${updatedCount} points (${snappedCount} snapped) on shape ID ${shape.id}`);
                         }
@@ -675,9 +623,10 @@
         })
 
         shapes.forEach(shape => {
-            if (typeof shape.redraw === 'function') {
-                shape.redraw();
-            }
+            if (typeof shape.updatePoints === "function") {
+            shape.updatePoints();
+        } else if (typeof shape.redraw === "function") {
+            shape.redraw();}
         })
 
         refreshCanvasBounds();
@@ -765,9 +714,10 @@
         })
 
         shapes.forEach(shape => {
-            if (typeof shape.redraw === 'function') {
-                shape.redraw();
-            }
+            if (typeof shape.updatePoints === "function") {
+            shape.updatePoints();
+        } else if (typeof shape.redraw === "function") {
+            shape.redraw();}
         })
 
         refreshCanvasBounds();
@@ -813,9 +763,10 @@
         const driftY = Math.abs(newCenterY - centerY);
         const totalDrift = Math.sqrt(driftX * driftX + driftY * driftY);
 
-        if (typeof shape.redraw === 'function') {
-            shape.redraw();
-        }
+        if (typeof shape.updatePoints === "function") {
+            shape.updatePoints();
+        } else if (typeof shape.redraw === "function") {
+            shape.redraw();}
 
         if (totalDrift > 0.1) {
             const lerpSteps = totalDrift > 1 ? 3 : 1;
