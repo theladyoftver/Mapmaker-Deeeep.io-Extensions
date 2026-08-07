@@ -108,67 +108,6 @@
         return screenObjects;
     }
 
-    if (debugMode) console.log('Bake: Hooks ready (enhanced with position baking)');
-
-    let originalFetch = window.fetch;
-    window.fetch = async function(url, options = {}) {
-        const urlStr = url.toString();
-        if (debugMode) console.log('NET DEBUG: Fetch to', urlStr, '- Method:', options?.method || 'GET');
-        const isMapSave = urlStr.includes('/maps/') && (options?.method === 'PUT' || options?.method === 'POST' || options?.method === 'PATCH');
-        if (isMapSave && options?.body) {
-            console.log('Bake: PUT/POST to /maps intercepted!', {url: urlStr, method: options.method});
-            try {
-                let bodyObj = options.body;
-                let wasString = false;
-                if (typeof bodyObj === 'string') {
-                    wasString = true;
-                    bodyObj = JSON.parse(bodyObj);
-                    console.log('Bake: Parsed string to object');
-                } else if (bodyObj && typeof bodyObj === 'object') {
-                    console.log('Bake: Direct object body - Keys:', Object.keys(bodyObj).slice(0, 5));
-                } else {
-                    console.log('Bake: Unexpected body type:', typeof bodyObj);
-                    return originalFetch.apply(this, arguments);
-                }
-
-                let modified = false;
-                if (bodyObj?.data && typeof bodyObj.data === 'string') {
-                    let mapData;
-                    try {
-                        mapData = JSON.parse(bodyObj.data);
-                        if (mapData?.screenObjects) {
-                            console.log('Bake: screenObjects found (length:', mapData.screenObjects.length, ')- Applying');
-                            bakeIntoScreenObjects(mapData.screenObjects);
-                            bodyObj.data = JSON.stringify(mapData);
-                            modified = true;
-                            console.log('Bake: Inner data injected');
-                        } else {
-                            console.log('Bake: No screenObjects - Data snippet:', bodyObj.data.substring(0, 200));
-                        }
-                    } catch (parseErr) {
-                        console.error('Bake: Parse data error:', parseErr);
-                    }
-                } else {
-                    console.log('Bake: No "data" field or not string - Skipping');
-                }
-
-                if (wasString && modified) {
-                    options.body = JSON.stringify(bodyObj);
-                    console.log('Bake: Full body re-stringified for fetch');
-                } else {
-                    options.body = bodyObj;
-                }
-                bakedChanges = {};
-                console.log('Bake: Forwarding modified body');
-            } catch (e) {
-                console.error('Bake fetch error:', e);
-            }
-        }
-        return originalFetch.apply(this, arguments);
-    };
-
-    console.log('Full script: Fetch hook ready');
-
     const originalOpen = window.XMLHttpRequest.prototype.open;
     window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
         const urlStr = url.toString();
